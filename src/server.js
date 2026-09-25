@@ -6,8 +6,12 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { Server } from 'socket.io';
 import { Game } from './models/Game.js';
+import { createAuthRouter } from './routes/auth.js';
+import { createPasswordResetRouter } from './routes/password-reset.js';
+import { createSessionRouter } from './routes/session.js';
 import { applyChessMove, INITIAL_FEN, sideToMove } from './services/chess-service.js';
 import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/stockfish-service.js';
+import { verifyEmailTransport } from './services/email-service.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
 const corsOrigin = process.env.CORS_ORIGIN ?? '*';
@@ -19,6 +23,9 @@ let mongoReady = false;
 
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
+app.use('/api/auth', createAuthRouter({ isDatabaseReady: () => mongoReady }));
+app.use('/api/auth', createSessionRouter({ isDatabaseReady: () => mongoReady }));
+app.use('/api/auth', createPasswordResetRouter({ isDatabaseReady: () => mongoReady }));
 
 function toPlain(game) {
   return typeof game.toObject === 'function' ? game.toObject() : game;
@@ -307,6 +314,9 @@ async function start() {
       await mongoose.connect(process.env.MONGODB_URI);
       mongoReady = true;
       console.log('MongoDB connected');
+      void verifyEmailTransport()
+        .then((ready) => console.log(ready ? 'Email transport is ready' : 'Email transport is not configured'))
+        .catch((error) => console.warn(`Email transport unavailable: ${error.message}`));
     } catch (error) {
       console.warn(`MongoDB unavailable, using in-memory games: ${error.message}`);
     }

@@ -6,14 +6,18 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "check": "node --check src/server.js"
+    "check": "node --check src/server.js && node --check src/routes/session.js && node --check src/routes/password-reset.js && node --check src/services/email-service.js",
+    "test:session": "node scripts/smoke-session.mjs",
+    "test:password-reset": "node scripts/smoke-password-reset.mjs"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "chess.js": "^1.4.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "mongoose": "^8.18.0",
+    "nodemailer": "^10.0.10",
     "socket.io": "^4.8.1",
     "stockfish": "^19.0.0"
   }
