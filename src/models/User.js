@@ -62,6 +62,15 @@ const userSchema = new mongoose.Schema(
       default: Date.now,
       index: true,
     },
+    expoPushTokens: {
+      type: [{
+        token: { type: String, required: true, trim: true },
+        platform: { type: String, enum: ['android', 'ios'], required: true },
+        updatedAt: { type: Date, default: Date.now },
+      }],
+      default: [],
+      select: false,
+    },
     googleSubject: {
       type: String,
       unique: true,
@@ -87,6 +96,7 @@ userSchema.set('toJSON', {
     delete returnedObject.following;
     delete returnedObject.followers;
     delete returnedObject.blockedUsers;
+    delete returnedObject.expoPushTokens;
     delete returnedObject.googleSubject;
     return returnedObject;
   },

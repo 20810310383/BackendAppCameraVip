@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import { Server } from 'socket.io';
 import { Game } from './models/Game.js';
 import { FriendRequest } from './models/FriendRequest.js';
+import { Message } from './models/Message.js';
 import { Session } from './models/Session.js';
 import { User } from './models/User.js';
 import { createAuthRouter } from './routes/auth.js';
@@ -14,7 +15,9 @@ import { createPasswordResetRouter } from './routes/password-reset.js';
 import { createProfileRouter, uploadsDirectory } from './routes/profile.js';
 import { createSessionRouter } from './routes/session.js';
 import { createSocialRouter } from './routes/social.js';
+import { createMessageRouter } from './routes/messages.js';
 import { applyChessMove, INITIAL_FEN, sideToMove } from './services/chess-service.js';
+import { canUsersMessage } from './services/message-service.js';
 import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/stockfish-service.js';
 import { verifyEmailTransport } from './services/email-service.js';
 import { findAvailableUsername } from './services/username-service.js';
@@ -62,6 +65,11 @@ app.use('/api', createSocialRouter({
   isDatabaseReady: () => mongoReady,
   emitSocialEvent,
   isUserOnline,
+}));
+app.use('/api', createMessageRouter({
+  isDatabaseReady: () => mongoReady,
+  isUserOnline,
+  emitMessageEvent: emitSocialEvent,
 }));
 app.use('/api', createProfileRouter({
   isDatabaseReady: () => mongoReady,
@@ -190,6 +198,20 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.warn(`Social realtime subscription failed: ${error.message}`);
       respond({ error: 'Không thể kết nối cập nhật thời gian thực.' });
+    }
+  });
+
+  socket.on('message:typing', async (payload = {}) => {
+    try {
+      if (!mongoReady || !socket.data.socialUserId) return;
+      const recipientId = typeof payload.recipientId === 'string' ? payload.recipientId : '';
+      if (!recipientId || !(await canUsersMessage(socket.data.socialUserId, recipientId))) return;
+      emitSocialEvent(recipientId, 'message:typing', {
+        fromUserId: socket.data.socialUserId,
+        isTyping: Boolean(payload.isTyping),
+      });
+    } catch (error) {
+      console.warn(`Message typing update failed: ${error.message}`);
     }
   });
 
@@ -430,6 +452,7 @@ async function start() {
       await backfillUsernames();
       await User.createIndexes();
       await FriendRequest.createIndexes();
+      await Message.createIndexes();
       mongoReady = true;
       console.log('MongoDB connected');
       void verifyEmailTransport()
