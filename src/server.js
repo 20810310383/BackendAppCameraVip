@@ -400,6 +400,29 @@ io.on('connection', (socket) => {
   });
 });
 
+let isShuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  try {
+    io.close();
+    if (typeof httpServer.closeAllConnections === 'function') {
+      httpServer.closeAllConnections();
+    }
+    await new Promise((resolve) => httpServer.close(resolve));
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.disconnect();
+    }
+  } catch (err) {
+    console.error('Error during shutdown:', err);
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
 async function start() {
   if (process.env.MONGODB_URI) {
     try {
@@ -419,10 +442,36 @@ async function start() {
     console.warn('MONGODB_URI is not set, using in-memory games for local demo.');
   }
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
+  let attempts = 0;
+  const maxRetries = 10;
+  const retryDelay = 600;
+
+  function tryListen() {
+    httpServer.listen(PORT, '0.0.0.0');
+  }
+
+  httpServer.on('listening', () => {
     console.log(`Boardverse API listening on http://0.0.0.0:${PORT}`);
     void warmStockfish().then(() => console.log('Stockfish is ready')).catch((error) => console.warn(`Stockfish prewarm failed: ${error.message}`));
   });
+
+  httpServer.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      attempts += 1;
+      if (attempts <= maxRetries) {
+        console.warn(`Port ${PORT} is in use, retrying in ${retryDelay}ms (${attempts}/${maxRetries})...`);
+        setTimeout(() => {
+          tryListen();
+        }, retryDelay);
+        return;
+      }
+      console.error(`Port ${PORT} is still in use after ${maxRetries} retries.`);
+    } else {
+      console.error('HTTP server error:', error);
+    }
+  });
+
+  tryListen();
 }
 
 start();

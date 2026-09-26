@@ -3,6 +3,7 @@ import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import multer from 'multer';
 import sharp from 'sharp';
 import { FriendRequest } from '../models/FriendRequest.js';
@@ -76,8 +77,8 @@ async function profileStats(user) {
   return {
     posts: 0,
     friends,
-    following: friends + outgoingRequests,
-    followers: friends + incomingRequests,
+    following: friends + incomingRequests,
+    followers: friends + outgoingRequests,
   };
 }
 
@@ -154,17 +155,37 @@ export function createProfileRouter({ isDatabaseReady, emitSocialEvent = () => u
     try {
       const user = await authenticatedUser(request, response);
       if (!user) return;
-      const friend = await User.findById(request.params.userId);
-      if (!friend || !(user.friends || []).some((friendId) => friendId.equals(friend._id))) {
-        return response.status(404).json({ code: 'FRIEND_PROFILE_NOT_FOUND', message: 'Hồ sơ này không còn trong danh sách bạn bè.' });
+      const rawParam = String(request.params.userId || '').trim();
+      let targetUser = null;
+      if (mongoose.isValidObjectId(rawParam)) {
+        targetUser = await User.findById(rawParam);
       }
-      if ((friend.blockedUsers || []).some((blockedUserId) => blockedUserId.equals(user._id))) {
+      if (!targetUser) {
+        targetUser = await User.findOne({ username: rawParam.replace(/^@+/, '').toLowerCase() });
+      }
+      if (!targetUser) {
+        return response.status(404).json({ code: 'USER_NOT_FOUND', message: 'Người dùng không tồn tại.' });
+      }
+      if ((targetUser.blockedUsers || []).some((blockedUserId) => blockedUserId.equals(user._id))) {
         return response.status(403).json({ code: 'PROFILE_UNAVAILABLE', message: 'Hồ sơ này hiện không khả dụng.' });
       }
-      return response.json(await friendProfilePayload(friend, isUserOnline));
+      const isFriend = (user.friends || []).some((friendId) => friendId.equals(targetUser._id));
+      const outgoingRequest = await FriendRequest.findOne({ from: user._id, to: targetUser._id });
+      const incomingRequest = await FriendRequest.findOne({ from: targetUser._id, to: user._id });
+      const payload = await friendProfilePayload(targetUser, isUserOnline);
+      return response.json({
+        ...payload,
+        relationship: {
+          isFriend,
+          hasOutgoingRequest: Boolean(outgoingRequest),
+          hasIncomingRequest: Boolean(incomingRequest),
+          incomingRequestId: incomingRequest?._id?.toString() || null,
+          outgoingRequestId: outgoingRequest?._id?.toString() || null,
+        },
+      });
     } catch (error) {
       console.error('Get friend profile failed:', error);
-      return response.status(500).json({ code: 'GET_FRIEND_PROFILE_FAILED', message: 'Không thể tải hồ sơ bạn bè lúc này.' });
+      return response.status(500).json({ code: 'GET_FRIEND_PROFILE_FAILED', message: 'Không thể tải hồ sơ người dùng lúc này.' });
     }
   });
 

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { Session } from '../models/Session.js';
 
-export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
+export const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days for mobile app sessions
 
 export function hashSessionToken(token) {
   return createHash('sha256').update(token).digest('hex');

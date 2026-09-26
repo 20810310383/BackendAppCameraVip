@@ -57,6 +57,7 @@ function userSummary(user, isUserOnline) {
     id: user.id || user._id.toString(),
     fullName: user.fullName,
     username: user.username,
+    avatarPath: user.avatarPath || '',
     isOnline: Boolean(isUserOnline(user._id)),
     lastActiveAt: user.lastActiveAt ? user.lastActiveAt.toISOString() : null,
     activityLabel: isUserOnline(user._id) ? 'Đang hoạt động' : lastActiveLabel(user.lastActiveAt),
@@ -70,12 +71,12 @@ function friendPairKey(firstUserId, secondUserId) {
 async function friendList(userId, isUserOnline) {
   const user = await User.findById(userId).populate({
     path: 'friends',
-    select: 'fullName username lastActiveAt',
+    select: 'fullName username lastActiveAt avatarPath',
     options: { sort: { fullName: 1 } },
   });
   const friends = (user?.friends || []).filter(Boolean).map((friend) => userSummary(friend, isUserOnline));
   const outgoingRequests = await FriendRequest.find({ from: userId })
-    .populate({ path: 'to', select: 'fullName username lastActiveAt' })
+    .populate({ path: 'to', select: 'fullName username lastActiveAt avatarPath' })
     .sort({ createdAt: -1 });
 
   return {
@@ -92,7 +93,7 @@ async function friendList(userId, isUserOnline) {
 
 async function incomingRequestList(userId, isUserOnline) {
   const requests = await FriendRequest.find({ to: userId })
-    .populate({ path: 'from', select: 'fullName username lastActiveAt' })
+    .populate({ path: 'from', select: 'fullName username lastActiveAt avatarPath' })
     .sort({ createdAt: -1 });
 
   return {
