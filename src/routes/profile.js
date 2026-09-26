@@ -166,7 +166,8 @@ export function createProfileRouter({ isDatabaseReady, emitSocialEvent = () => u
       if (!targetUser) {
         return response.status(404).json({ code: 'USER_NOT_FOUND', message: 'Người dùng không tồn tại.' });
       }
-      if ((targetUser.blockedUsers || []).some((blockedUserId) => blockedUserId.equals(user._id))) {
+      if ((targetUser.blockedUsers || []).some((blockedUserId) => blockedUserId.equals(user._id))
+        || (user.blockedUsers || []).some((blockedUserId) => blockedUserId.equals(targetUser._id))) {
         return response.status(403).json({ code: 'PROFILE_UNAVAILABLE', message: 'Hồ sơ này hiện không khả dụng.' });
       }
       const isFriend = (user.friends || []).some((friendId) => friendId.equals(targetUser._id));

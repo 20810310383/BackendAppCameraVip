@@ -106,12 +106,103 @@ async function incomingRequestList(userId, isUserOnline) {
   };
 }
 
+async function blockedUserList(userId, isUserOnline) {
+  const user = await User.findById(userId).populate({
+    path: 'blockedUsers',
+    select: 'fullName username lastActiveAt avatarPath',
+    options: { sort: { fullName: 1 } },
+  });
+  return (user?.blockedUsers || []).filter(Boolean).map((blocked) => userSummary(blocked, isUserOnline));
+}
+
 export function createSocialRouter({
   isDatabaseReady,
   emitSocialEvent = () => undefined,
   isUserOnline = () => false,
 }) {
   const router = Router();
+
+  const handleBlockUser = async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const targetUserId = request.params.targetUserId || request.params.friendId;
+      const targetUser = await User.findById(targetUserId);
+      if (!targetUser) {
+        return response.status(404).json({ code: 'USER_NOT_FOUND', message: 'Người dùng không tồn tại.' });
+      }
+      if (targetUser._id.equals(user._id)) {
+        return response.status(422).json({ code: 'CANNOT_BLOCK_SELF', message: 'Bạn không thể tự chặn chính mình.' });
+      }
+
+      await Promise.all([
+        User.updateOne(
+          { _id: user._id },
+          { $addToSet: { blockedUsers: targetUser._id }, $pull: { friends: targetUser._id } },
+        ),
+        User.updateOne({ _id: targetUser._id }, { $pull: { friends: user._id } }),
+        FriendRequest.deleteMany({
+          $or: [
+            { from: user._id, to: targetUser._id },
+            { from: targetUser._id, to: user._id },
+          ],
+        }),
+      ]);
+      emitSocialEvent(user._id, 'social:friends-updated', { reason: 'friend_blocked' });
+      emitSocialEvent(user._id, 'social:blocked-users-updated', {});
+      emitSocialEvent(targetUser._id, 'social:friend-removed', { userId: user._id.toString(), reason: 'friend_blocked' });
+      emitSocialEvent(targetUser._id, 'social:friends-updated', { reason: 'friend_blocked' });
+      return response.json({
+        message: `Đã chặn @${targetUser.username}.`,
+        ...(await friendList(user._id, isUserOnline)),
+      });
+    } catch (error) {
+      console.error('Block user failed:', error);
+      return response.status(500).json({ code: 'BLOCK_USER_FAILED', message: 'Không thể chặn người dùng lúc này.' });
+    }
+  };
+
+  const handleUnblockUser = async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const targetUserId = request.params.targetUserId;
+      const targetUser = await User.findById(targetUserId);
+      if (!targetUser) {
+        return response.status(404).json({ code: 'USER_NOT_FOUND', message: 'Người dùng không tồn tại.' });
+      }
+
+      await User.updateOne({ _id: user._id }, { $pull: { blockedUsers: targetUser._id } });
+      emitSocialEvent(user._id, 'social:blocked-users-updated', {});
+      return response.json({
+        message: `Đã huỷ chặn @${targetUser.username}.`,
+        blockedUsers: await blockedUserList(user._id, isUserOnline),
+      });
+    } catch (error) {
+      console.error('Unblock user failed:', error);
+      return response.status(500).json({ code: 'UNBLOCK_USER_FAILED', message: 'Không thể huỷ chặn lúc này.' });
+    }
+  };
+
+  router.get('/users/blocked', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const blocked = await blockedUserList(user._id, isUserOnline);
+      return response.json({ blockedUsers: blocked });
+    } catch (error) {
+      console.error('Get blocked users failed:', error);
+      return response.status(500).json({ code: 'GET_BLOCKED_USERS_FAILED', message: 'Không thể tải danh sách chặn.' });
+    }
+  });
+
+  router.post('/friends/:friendId/block', handleBlockUser);
+  router.post('/users/:targetUserId/block', handleBlockUser);
+  router.post('/users/:targetUserId/unblock', handleUnblockUser);
+  router.delete('/users/:targetUserId/block', handleUnblockUser);
 
   router.patch('/users/me/username', async (request, response) => {
     if (!isDatabaseReady()) return databaseUnavailable(response);
