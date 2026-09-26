@@ -27,6 +27,11 @@ const messageSchema = new mongoose.Schema(
     attachment: { type: attachmentSchema, default: undefined },
     deliveredAt: { type: Date, default: null },
     readAt: { type: Date, default: null },
+    deletedFor: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+      default: [],
+      index: true,
+    },
   },
   { timestamps: true },
 );

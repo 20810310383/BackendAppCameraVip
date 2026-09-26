@@ -219,6 +219,7 @@ async function markConversationRead({ user, friend, emitMessageEvent }) {
     conversationKey: key,
     sender: friend._id,
     recipient: user._id,
+    deletedFor: { $ne: user._id },
     readAt: null,
   }).select('_id');
   if (!unreadMessages.length) return null;
@@ -287,7 +288,7 @@ export function createMessageRouter({
       const user = await authenticatedUser(request, response);
       if (!user) return;
       const rows = await Message.aggregate([
-        { $match: { participants: user._id } },
+        { $match: { participants: user._id, deletedFor: { $ne: user._id } } },
         { $sort: { createdAt: -1 } },
         {
           $group: {
@@ -346,7 +347,7 @@ export function createMessageRouter({
       await markConversationRead({ user, friend, emitMessageEvent });
       const key = conversationKeyFor(user._id, friend._id);
       const before = new Date(String(request.query.before || ''));
-      const query = { conversationKey: key };
+      const query = { conversationKey: key, deletedFor: { $ne: user._id } };
       if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
       const limit = requestLimit(request.query.limit);
       const rows = await Message.find(query)
@@ -366,6 +367,27 @@ export function createMessageRouter({
     } catch (error) {
       console.error('Get conversation failed:', error);
       return response.status(500).json({ code: 'GET_CONVERSATION_FAILED', message: 'Không thể tải tin nhắn lúc này.' });
+    }
+  });
+
+  router.delete('/messages/conversations/:friendId', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const friendId = request.params.friendId;
+      if (!mongoose.isValidObjectId(friendId)) {
+        return response.status(404).json({ code: 'USER_NOT_FOUND', message: 'Không tìm thấy người dùng này.' });
+      }
+      const key = conversationKeyFor(user._id, friendId);
+      await Message.updateMany(
+        { conversationKey: key, participants: user._id },
+        { $addToSet: { deletedFor: user._id } }
+      );
+      return response.json({ ok: true });
+    } catch (error) {
+      console.error('Delete conversation failed:', error);
+      return response.status(500).json({ code: 'DELETE_CONVERSATION_FAILED', message: 'Không thể xóa cuộc trò chuyện lúc này.' });
     }
   });
 
