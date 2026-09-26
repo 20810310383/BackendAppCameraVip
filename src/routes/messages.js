@@ -21,15 +21,39 @@ const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/heic', 'image/heif']);
 const AUDIO_MIME_TYPES = new Set([
-  'audio/aac', 'audio/m4a', 'audio/mp4', 'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/webm', 'audio/wav', 'audio/x-wav', 'audio/3gpp',
+  'audio/aac',
+  'audio/x-aac',
+  'audio/m4a',
+  'audio/x-m4a',
+  'audio/mp4',
+  'audio/mp4a-latm',
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/ogg',
+  'audio/webm',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/3gpp',
+  'audio/3gp',
+  'audio/amr',
+  'application/octet-stream',
+  'video/mp4',
 ]);
 
 const messageUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_AUDIO_BYTES, files: 1 },
   fileFilter: (_request, file, callback) => {
-    if ((file.fieldname === 'image' && IMAGE_MIME_TYPES.has(file.mimetype))
-      || (file.fieldname === 'audio' && AUDIO_MIME_TYPES.has(file.mimetype))) {
+    const isImage =
+      file.fieldname === 'image' &&
+      (IMAGE_MIME_TYPES.has(file.mimetype) || file.mimetype?.startsWith('image/'));
+    const isAudio =
+      file.fieldname === 'audio' &&
+      (file.mimetype?.startsWith('audio/') ||
+        AUDIO_MIME_TYPES.has(file.mimetype) ||
+        /\.(m4a|mp3|aac|wav|ogg|webm|3gp|mp4)$/i.test(file.originalname));
+
+    if (isImage || isAudio) {
       callback(null, true);
       return;
     }
@@ -123,9 +147,9 @@ async function persistImage(file, userId) {
   await mkdir(messageImageDirectory, { recursive: true });
   const filename = `image-${userId}-${randomBytes(12).toString('hex')}.webp`;
   const destination = path.join(messageImageDirectory, filename);
-  const image = sharp(file.buffer, { failOn: 'none', limitInputPixels: 24_000_000 }).rotate();
+  const image = sharp(file.buffer, { failOn: 'none', limitInputPixels: 36_000_000 }).rotate();
   const metadata = await image.metadata();
-  await image.resize({ width: 1800, height: 1800, fit: 'inside', withoutEnlargement: true }).webp({ quality: 84, effort: 4 }).toFile(destination);
+  await image.resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true }).webp({ quality: 95, effort: 4 }).toFile(destination);
   return {
     path: `/uploads/messages/images/${filename}`,
     mimeType: 'image/webp',
@@ -135,24 +159,25 @@ async function persistImage(file, userId) {
   };
 }
 
-function audioExtension(mimeType) {
+function audioExtension(mimeType, originalName = '') {
+  if (originalName && path.extname(originalName)) return path.extname(originalName).toLowerCase();
   if (mimeType === 'audio/webm') return '.webm';
   if (mimeType === 'audio/ogg') return '.ogg';
   if (mimeType === 'audio/wav' || mimeType === 'audio/x-wav') return '.wav';
-  if (mimeType === 'audio/3gpp') return '.3gp';
+  if (mimeType === 'audio/3gpp' || mimeType === 'audio/3gp') return '.3gp';
   if (mimeType === 'audio/mpeg' || mimeType === 'audio/mp3') return '.mp3';
-  if (mimeType === 'audio/aac') return '.aac';
+  if (mimeType === 'audio/aac' || mimeType === 'audio/x-aac') return '.aac';
   return '.m4a';
 }
 
 async function persistAudio(file, userId, durationMs) {
   if (file.size > MAX_AUDIO_BYTES) throw new Error('Tin nhắn thoại tối đa 20 MB.');
   await mkdir(messageAudioDirectory, { recursive: true });
-  const filename = `voice-${userId}-${randomBytes(12).toString('hex')}${audioExtension(file.mimetype)}`;
+  const filename = `voice-${userId}-${randomBytes(12).toString('hex')}${audioExtension(file.mimetype, file.originalname)}`;
   await writeFile(path.join(messageAudioDirectory, filename), file.buffer);
   return {
     path: `/uploads/messages/audio/${filename}`,
-    mimeType: file.mimetype,
+    mimeType: file.mimetype || 'audio/m4a',
     filename,
     durationMs: Number.isFinite(durationMs) && durationMs > 0 ? Math.round(durationMs) : undefined,
   };
