@@ -62,9 +62,15 @@ const userSchema = new mongoose.Schema(
       default: Date.now,
       index: true,
     },
+    googleSubject: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      immutable: true,
+    },
     passwordHash: {
       type: String,
-      required: true,
       select: false,
     },
   },
@@ -81,6 +87,7 @@ userSchema.set('toJSON', {
     delete returnedObject.following;
     delete returnedObject.followers;
     delete returnedObject.blockedUsers;
+    delete returnedObject.googleSubject;
     return returnedObject;
   },
 });

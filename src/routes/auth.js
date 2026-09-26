@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
+import { OAuth2Client } from 'google-auth-library';
 import { User } from '../models/User.js';
+import { createUserSession, sessionPayload } from '../services/session-service.js';
 import { findAvailableUsername } from '../services/username-service.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_MIN_LENGTH = 6;
+const googleTokenVerifier = new OAuth2Client();
 
 function normalizeFullName(value) {
   return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
@@ -12,6 +15,45 @@ function normalizeFullName(value) {
 
 function normalizeEmail(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function googleAudienceClientIds() {
+  const raw = [
+    process.env.GOOGLE_OAUTH_CLIENT_IDS,
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_WEB_CLIENT_ID,
+    process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+  ];
+  const ids = raw
+    .filter(Boolean)
+    .flatMap((val) => String(val).split(','))
+    .map((clientId) => clientId.trim())
+    .filter(Boolean);
+  return Array.from(new Set(ids));
+}
+
+function googleProfileName(name, email) {
+  const normalizedName = normalizeFullName(name).slice(0, 80);
+  if (normalizedName.length >= 2) return normalizedName;
+
+  const fallbackName = normalizeFullName(
+    email.split('@')[0].replace(/[._-]+/g, ' '),
+  ).slice(0, 80);
+  return fallbackName.length >= 2 ? fallbackName : 'Google User';
+}
+
+async function createGoogleUser({ email, fullName, googleSubject, avatarPath = '' }) {
+  let user;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const username = await findAvailableUsername(User, email.split('@')[0]);
+    try {
+      user = await User.create({ email, fullName, username, googleSubject, avatarPath });
+      break;
+    } catch (error) {
+      if (error?.code !== 11000 || !error?.keyPattern?.username || attempt === 2) throw error;
+    }
+  }
+  return user;
 }
 
 function validateRegistration({ fullName, email, password }) {
@@ -121,6 +163,104 @@ export function createAuthRouter({ isDatabaseReady }) {
       return response.status(500).json({
         code: 'REGISTER_FAILED',
         message: 'Không thể đăng ký tài khoản lúc này.',
+      });
+    }
+  });
+
+  router.post('/google', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+
+    const idToken = typeof request.body?.idToken === 'string' ? request.body.idToken.trim() : '';
+    if (!idToken || idToken.length > 12_000) {
+      return response.status(422).json({
+        code: 'VALIDATION_ERROR',
+        errors: { idToken: 'ID token Google không hợp lệ.' },
+      });
+    }
+
+    const audiences = googleAudienceClientIds();
+    if (audiences.length === 0) {
+      console.error('Google sign-in is not configured: GOOGLE_OAUTH_CLIENT_IDS is missing.');
+      return response.status(503).json({
+        code: 'GOOGLE_AUTH_NOT_CONFIGURED',
+        message: 'Đăng nhập Google chưa được cấu hình trên máy chủ.',
+      });
+    }
+
+    let googleProfile;
+    try {
+      const ticket = await googleTokenVerifier.verifyIdToken({ idToken, audience: audiences });
+      googleProfile = ticket.getPayload();
+    } catch (error) {
+      console.warn(`Google ID token verification failed: ${error.message}`);
+      return response.status(401).json({
+        code: 'GOOGLE_TOKEN_INVALID',
+        message: 'Phiên xác thực Google không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.',
+      });
+    }
+
+    const email = normalizeEmail(googleProfile?.email);
+    const googleSubject = typeof googleProfile?.sub === 'string' ? googleProfile.sub.trim() : '';
+    if (!googleSubject || !EMAIL_PATTERN.test(email) || googleProfile?.email_verified !== true) {
+      return response.status(401).json({
+        code: 'GOOGLE_EMAIL_UNVERIFIED',
+        message: 'Google chưa xác minh địa chỉ email này.',
+      });
+    }
+
+    try {
+      let user = await User.findOne({ googleSubject });
+
+      if (!user) {
+        const userWithSameEmail = await User.findOne({ email });
+        if (userWithSameEmail) {
+          if (userWithSameEmail.googleSubject && userWithSameEmail.googleSubject !== googleSubject) {
+            return response.status(409).json({
+              code: 'GOOGLE_ACCOUNT_LINK_CONFLICT',
+              message: 'Email này đã được liên kết với một tài khoản Google khác.',
+            });
+          }
+
+          // Link a verified Google email to its existing password account.
+          userWithSameEmail.googleSubject = googleSubject;
+          if (!userWithSameEmail.avatarPath && typeof googleProfile?.picture === 'string' && googleProfile.picture.trim()) {
+            userWithSameEmail.avatarPath = googleProfile.picture.trim();
+          }
+          await userWithSameEmail.save();
+          user = userWithSameEmail;
+        } else {
+          user = await createGoogleUser({
+            email,
+            fullName: googleProfileName(googleProfile?.name, email),
+            googleSubject,
+            avatarPath: typeof googleProfile?.picture === 'string' ? googleProfile.picture.trim() : '',
+          });
+        }
+      }
+
+      const tokens = await createUserSession({
+        userId: user._id,
+        userAgent: request.get('user-agent'),
+        ipAddress: request.ip,
+      });
+
+      return response.json({
+        message: 'Đăng nhập Google thành công.',
+        user: user.toJSON(),
+        ...sessionPayload(tokens),
+      });
+    } catch (error) {
+      if (error?.code === 11000 && error?.keyPattern?.email) {
+        return response.status(409).json({
+          code: 'EMAIL_EXISTS',
+          message: 'Không thể liên kết tài khoản Google với email này. Vui lòng thử lại.',
+        });
+      }
+
+      console.error('Google sign-in failed:', error);
+      return response.status(500).json({
+        code: 'GOOGLE_LOGIN_FAILED',
+        message: 'Không thể đăng nhập Google lúc này. Vui lòng thử lại.',
       });
     }
   });
