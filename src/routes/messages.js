@@ -116,16 +116,19 @@ function messagePayload(message, isUserOnline) {
   const plain = typeof message.toObject === 'function' ? message.toObject() : message;
   const sender = plain.sender?.fullName ? userSummary(plain.sender, isUserOnline) : plain.sender;
   const recipient = plain.recipient?.fullName ? userSummary(plain.recipient, isUserOnline) : plain.recipient;
+  const isRevoked = Boolean(plain.revokedAt);
   return {
     id: plain._id?.toString() || plain.id,
     conversationKey: plain.conversationKey,
     sender,
     recipient,
     type: plain.type,
-    text: plain.text || '',
-    attachment: plain.attachment || null,
+    text: isRevoked ? 'Tin nhắn đã bị thu hồi' : (plain.text || ''),
+    attachment: isRevoked ? null : (plain.attachment || null),
     deliveredAt: plain.deliveredAt ? new Date(plain.deliveredAt).toISOString() : null,
     readAt: plain.readAt ? new Date(plain.readAt).toISOString() : null,
+    isRevoked,
+    revokedAt: plain.revokedAt ? new Date(plain.revokedAt).toISOString() : null,
     createdAt: new Date(plain.createdAt).toISOString(),
   };
 }
@@ -388,6 +391,76 @@ export function createMessageRouter({
     } catch (error) {
       console.error('Delete conversation failed:', error);
       return response.status(500).json({ code: 'DELETE_CONVERSATION_FAILED', message: 'Không thể xóa cuộc trò chuyện lúc này.' });
+    }
+  });
+
+  router.delete('/messages/item/:messageId', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const { messageId } = request.params;
+      if (!mongoose.isValidObjectId(messageId)) {
+        return response.status(404).json({ code: 'MESSAGE_NOT_FOUND', message: 'Không tìm thấy tin nhắn.' });
+      }
+      const message = await Message.findOne({ _id: messageId, participants: user._id });
+      if (!message) {
+        return response.status(404).json({ code: 'MESSAGE_NOT_FOUND', message: 'Không tìm thấy tin nhắn.' });
+      }
+      message.deletedFor = message.deletedFor || [];
+      if (!message.deletedFor.some((id) => id.equals(user._id))) {
+        message.deletedFor.push(user._id);
+        await message.save();
+      }
+      return response.json({ ok: true, messageId });
+    } catch (error) {
+      console.error('Delete message failed:', error);
+      return response.status(500).json({ code: 'DELETE_MESSAGE_FAILED', message: 'Không thể xóa tin nhắn lúc này.' });
+    }
+  });
+
+  router.post('/messages/item/:messageId/revoke', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const { messageId } = request.params;
+      if (!mongoose.isValidObjectId(messageId)) {
+        return response.status(404).json({ code: 'MESSAGE_NOT_FOUND', message: 'Không tìm thấy tin nhắn.' });
+      }
+      const message = await Message.findOne({ _id: messageId, participants: user._id });
+      if (!message) {
+        return response.status(404).json({ code: 'MESSAGE_NOT_FOUND', message: 'Không tìm thấy tin nhắn.' });
+      }
+      if (message.sender.toString() !== user._id.toString()) {
+        return response.status(403).json({ code: 'REVOKE_FORBIDDEN', message: 'Bạn chỉ có thể thu hồi tin nhắn do chính bạn gửi.' });
+      }
+      if (message.revokedAt) {
+        await populateMessage(message);
+        return response.json({ message: messagePayload(message, isUserOnline) });
+      }
+
+      const attachmentPath = message.attachment?.path;
+      message.revokedAt = new Date();
+      message.text = '';
+      message.attachment = undefined;
+      await message.save();
+
+      if (attachmentPath) {
+        await removeLocalAttachment(attachmentPath);
+      }
+
+      await populateMessage(message);
+      const payload = messagePayload(message, isUserOnline);
+
+      const recipientId = message.recipient?.id || message.recipient?._id?.toString() || message.recipient?.toString();
+      emitMessageEvent(recipientId, 'message:revoked', { message: payload, messageId: payload.id });
+      emitMessageEvent(user._id, 'message:revoked', { message: payload, messageId: payload.id });
+
+      return response.json({ message: payload });
+    } catch (error) {
+      console.error('Revoke message failed:', error);
+      return response.status(500).json({ code: 'REVOKE_MESSAGE_FAILED', message: 'Không thể thu hồi tin nhắn lúc này.' });
     }
   });
 
