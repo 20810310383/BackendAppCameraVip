@@ -6,12 +6,19 @@ import express from 'express';
 import mongoose from 'mongoose';
 import { Server } from 'socket.io';
 import { Game } from './models/Game.js';
+import { FriendRequest } from './models/FriendRequest.js';
+import { Session } from './models/Session.js';
+import { User } from './models/User.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createPasswordResetRouter } from './routes/password-reset.js';
+import { createProfileRouter, uploadsDirectory } from './routes/profile.js';
 import { createSessionRouter } from './routes/session.js';
+import { createSocialRouter } from './routes/social.js';
 import { applyChessMove, INITIAL_FEN, sideToMove } from './services/chess-service.js';
 import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/stockfish-service.js';
 import { verifyEmailTransport } from './services/email-service.js';
+import { findAvailableUsername } from './services/username-service.js';
+import { hashSessionToken } from './services/session-service.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
 const corsOrigin = process.env.CORS_ORIGIN ?? '*';
@@ -21,11 +28,57 @@ const io = new Server(httpServer, { cors: { origin: corsOrigin, methods: ['GET',
 const memoryGames = new Map();
 let mongoReady = false;
 
+function socialRoom(userId) {
+  return `social:user:${userId.toString()}`;
+}
+
+function isUserOnline(userId) {
+  return Boolean(io.sockets.adapter.rooms.get(socialRoom(userId))?.size);
+}
+
+function emitSocialEvent(userId, event, payload) {
+  io.to(socialRoom(userId)).emit(event, payload);
+}
+
+async function notifyFriendsOfPresence(userId, isOnline, lastActiveAt) {
+  if (!mongoReady) return;
+  const user = await User.findById(userId).select('friends');
+  for (const friendId of user?.friends || []) {
+    emitSocialEvent(friendId, 'social:presence-changed', {
+      userId: userId.toString(),
+      isOnline,
+      lastActiveAt: lastActiveAt.toISOString(),
+    });
+  }
+}
+
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
+app.use('/uploads', express.static(uploadsDirectory, { immutable: true, maxAge: '30d' }));
 app.use('/api/auth', createAuthRouter({ isDatabaseReady: () => mongoReady }));
 app.use('/api/auth', createSessionRouter({ isDatabaseReady: () => mongoReady }));
 app.use('/api/auth', createPasswordResetRouter({ isDatabaseReady: () => mongoReady }));
+app.use('/api', createSocialRouter({
+  isDatabaseReady: () => mongoReady,
+  emitSocialEvent,
+  isUserOnline,
+}));
+app.use('/api', createProfileRouter({
+  isDatabaseReady: () => mongoReady,
+  emitSocialEvent,
+  isUserOnline,
+}));
+
+async function backfillUsernames() {
+  const usersWithoutUsername = await User.find({
+    $or: [{ username: { $exists: false } }, { username: null }, { username: '' }],
+  }).select('_id email');
+
+  for (const user of usersWithoutUsername) {
+    const username = await findAvailableUsername(User, user.email.split('@')[0]);
+    await User.updateOne({ _id: user._id }, { $set: { username } });
+  }
+}
 
 function toPlain(game) {
   return typeof game.toObject === 'function' ? game.toObject() : game;
@@ -111,6 +164,35 @@ app.get('/api/games/:roomCode', async (request, response) => {
 });
 
 io.on('connection', (socket) => {
+  socket.on('social:subscribe', async (payload = {}, callback) => {
+    const respond = callbackOrNoop(callback);
+    if (!mongoReady) return respond({ error: 'Cơ sở dữ liệu đang tạm thời không khả dụng.' });
+
+    const accessToken = typeof payload.accessToken === 'string' ? payload.accessToken.trim() : '';
+    if (!accessToken) return respond({ error: 'Phiên đăng nhập không hợp lệ.' });
+
+    try {
+      const session = await Session.findOne({
+        accessTokenHash: hashSessionToken(accessToken),
+        accessTokenExpiresAt: { $gt: new Date() },
+      });
+      if (!session) return respond({ error: 'Phiên đăng nhập đã hết hạn.' });
+
+      const previousUserId = socket.data.socialUserId;
+      if (previousUserId && previousUserId !== session.userId.toString()) socket.leave(socialRoom(previousUserId));
+
+      socket.data.socialUserId = session.userId.toString();
+      socket.join(socialRoom(session.userId));
+      const lastActiveAt = new Date();
+      await User.updateOne({ _id: session.userId }, { $set: { lastActiveAt } });
+      await notifyFriendsOfPresence(session.userId, true, lastActiveAt);
+      respond({ ok: true });
+    } catch (error) {
+      console.warn(`Social realtime subscription failed: ${error.message}`);
+      respond({ error: 'Không thể kết nối cập nhật thời gian thực.' });
+    }
+  });
+
   socket.on('room:create', async (payload = {}, callback) => {
     const respond = callbackOrNoop(callback);
     try {
@@ -292,6 +374,16 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', async () => {
+    const socialUserId = socket.data.socialUserId;
+    if (socialUserId) {
+      setTimeout(() => {
+        if (isUserOnline(socialUserId)) return;
+        const lastActiveAt = new Date();
+        void User.updateOne({ _id: socialUserId }, { $set: { lastActiveAt } })
+          .then(() => notifyFriendsOfPresence(socialUserId, false, lastActiveAt))
+          .catch((error) => console.warn(`Could not update activity status: ${error.message}`));
+      }, 0);
+    }
     if (mongoReady) {
       await Game.updateMany({ 'players.socketId': socket.id }, { $set: { 'players.$.socketId': null } });
     }
@@ -312,6 +404,9 @@ async function start() {
   if (process.env.MONGODB_URI) {
     try {
       await mongoose.connect(process.env.MONGODB_URI);
+      await backfillUsernames();
+      await User.createIndexes();
+      await FriendRequest.createIndexes();
       mongoReady = true;
       console.log('MongoDB connected');
       void verifyEmailTransport()

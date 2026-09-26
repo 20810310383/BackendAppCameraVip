@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { User } from '../models/User.js';
+import { findAvailableUsername } from '../services/username-service.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_MIN_LENGTH = 6;
@@ -90,7 +91,16 @@ export function createAuthRouter({ isDatabaseReady }) {
       }
 
       const passwordHash = await bcrypt.hash(password, 12);
-      const user = await User.create({ fullName, email, passwordHash });
+      let user;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const username = await findAvailableUsername(User, email.split('@')[0]);
+        try {
+          user = await User.create({ fullName, email, username, passwordHash });
+          break;
+        } catch (error) {
+          if (error?.code !== 11000 || !error?.keyPattern?.username || attempt === 2) throw error;
+        }
+      }
 
       return response.status(201).json({
         message: 'Đăng ký tài khoản thành công.',
@@ -98,9 +108,12 @@ export function createAuthRouter({ isDatabaseReady }) {
       });
     } catch (error) {
       if (error?.code === 11000) {
+        const isUsernameConflict = Boolean(error?.keyPattern?.username);
         return response.status(409).json({
-          code: 'EMAIL_EXISTS',
-          errors: { email: 'Email này đã được sử dụng.' },
+          code: isUsernameConflict ? 'USERNAME_EXISTS' : 'EMAIL_EXISTS',
+          errors: isUsernameConflict
+            ? { username: 'Không thể tạo username khả dụng. Vui lòng thử lại.' }
+            : { email: 'Email này đã được sử dụng.' },
         });
       }
 

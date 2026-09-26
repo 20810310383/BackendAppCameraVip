@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/routes/session.js && node --check src/routes/password-reset.js && node --check src/services/email-service.js",
+    "check": "node --check src/server.js && node --check src/models/FriendRequest.js && node --check src/routes/session.js && node --check src/routes/password-reset.js && node --check src/routes/profile.js && node --check src/routes/social.js && node --check src/services/email-service.js && node --check src/services/username-service.js",
     "test:session": "node scripts/smoke-session.mjs",
     "test:password-reset": "node scripts/smoke-password-reset.mjs"
   },
@@ -17,7 +17,9 @@
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "mongoose": "^8.18.0",
+    "multer": "^2.4.0",
     "nodemailer": "^10.0.10",
+    "sharp": "^0.35.4",
     "socket.io": "^4.8.1",
     "stockfish": "^19.0.0"
   }
