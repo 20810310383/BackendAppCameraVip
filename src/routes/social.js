@@ -69,15 +69,20 @@ function friendPairKey(firstUserId, secondUserId) {
 }
 
 async function friendList(userId, isUserOnline) {
-  const user = await User.findById(userId).populate({
-    path: 'friends',
-    select: 'fullName username lastActiveAt avatarPath',
-    options: { sort: { fullName: 1 } },
-  });
+  const [user, outgoingRequests, incomingRequests] = await Promise.all([
+    User.findById(userId).populate({
+      path: 'friends',
+      select: 'fullName username lastActiveAt avatarPath',
+      options: { sort: { fullName: 1 } },
+    }),
+    FriendRequest.find({ from: userId })
+      .populate({ path: 'to', select: 'fullName username lastActiveAt avatarPath' })
+      .sort({ createdAt: -1 }),
+    FriendRequest.find({ to: userId })
+      .populate({ path: 'from', select: 'fullName username lastActiveAt avatarPath' })
+      .sort({ createdAt: -1 }),
+  ]);
   const friends = (user?.friends || []).filter(Boolean).map((friend) => userSummary(friend, isUserOnline));
-  const outgoingRequests = await FriendRequest.find({ from: userId })
-    .populate({ path: 'to', select: 'fullName username lastActiveAt avatarPath' })
-    .sort({ createdAt: -1 });
 
   return {
     friends,
@@ -85,6 +90,12 @@ async function friendList(userId, isUserOnline) {
     outgoingRequests: outgoingRequests.filter((request) => request.to).map((request) => ({
       id: request.id,
       user: userSummary(request.to, isUserOnline),
+      status: request.status,
+      createdAt: request.createdAt.toISOString(),
+    })),
+    incomingRequests: incomingRequests.filter((request) => request.from).map((request) => ({
+      id: request.id,
+      user: userSummary(request.from, isUserOnline),
       status: request.status,
       createdAt: request.createdAt.toISOString(),
     })),

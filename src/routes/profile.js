@@ -171,9 +171,11 @@ export function createProfileRouter({ isDatabaseReady, emitSocialEvent = () => u
         return response.status(403).json({ code: 'PROFILE_UNAVAILABLE', message: 'Hồ sơ này hiện không khả dụng.' });
       }
       const isFriend = (user.friends || []).some((friendId) => friendId.equals(targetUser._id));
-      const outgoingRequest = await FriendRequest.findOne({ from: user._id, to: targetUser._id });
-      const incomingRequest = await FriendRequest.findOne({ from: targetUser._id, to: user._id });
-      const payload = await friendProfilePayload(targetUser, isUserOnline);
+      const [outgoingRequest, incomingRequest, payload] = await Promise.all([
+        FriendRequest.findOne({ from: user._id, to: targetUser._id }),
+        FriendRequest.findOne({ from: targetUser._id, to: user._id }),
+        friendProfilePayload(targetUser, isUserOnline),
+      ]);
       return response.json({
         ...payload,
         relationship: {

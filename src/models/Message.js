@@ -28,6 +28,7 @@ const messageSchema = new mongoose.Schema(
     deliveredAt: { type: Date, default: null },
     readAt: { type: Date, default: null },
     revokedAt: { type: Date, default: null },
+    replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
     deletedFor: {
       type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
       default: [],

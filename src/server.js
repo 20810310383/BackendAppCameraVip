@@ -449,12 +449,14 @@ async function start() {
   if (process.env.MONGODB_URI) {
     try {
       await mongoose.connect(process.env.MONGODB_URI);
-      await backfillUsernames();
-      await User.createIndexes();
-      await FriendRequest.createIndexes();
-      await Message.createIndexes();
       mongoReady = true;
       console.log('MongoDB connected');
+      await backfillUsernames().catch((e) => console.warn('Backfill usernames warning:', e.message));
+      await Promise.allSettled([
+        User.createIndexes(),
+        FriendRequest.createIndexes(),
+        Message.createIndexes(),
+      ]);
       void verifyEmailTransport()
         .then((ready) => console.log(ready ? 'Email transport is ready' : 'Email transport is not configured'))
         .catch((error) => console.warn(`Email transport unavailable: ${error.message}`));

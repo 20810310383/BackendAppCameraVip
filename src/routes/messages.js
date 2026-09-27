@@ -9,7 +9,7 @@ import sharp from 'sharp';
 import { Message } from '../models/Message.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
-import { canUsersMessage, conversationKeyFor } from '../services/message-service.js';
+import { areUsersConnected, canUsersMessage, conversationKeyFor } from '../services/message-service.js';
 import { isExpoPushToken, sendChatPushNotification } from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
@@ -112,6 +112,26 @@ function userSummary(user, isUserOnline) {
   };
 }
 
+function replyToPayload(replyTo, isUserOnline) {
+  if (!replyTo) return null;
+  const plain = typeof replyTo.toObject === 'function' ? replyTo.toObject() : replyTo;
+  if (!plain._id && !plain.id) return null;
+  const sender = plain.sender?.fullName ? userSummary(plain.sender, isUserOnline) : plain.sender;
+  const isRevoked = Boolean(plain.revokedAt);
+  let textPreview = isRevoked ? 'Tin nhắn đã bị thu hồi' : (plain.text || '');
+  if (!isRevoked && !textPreview) {
+    if (plain.type === 'image') textPreview = '📷 Hình ảnh';
+    else if (plain.type === 'audio') textPreview = '🎤 Tin nhắn thoại';
+  }
+  return {
+    id: plain._id?.toString() || plain.id,
+    sender: sender ? { id: sender.id || sender._id?.toString(), fullName: sender.fullName || '' } : null,
+    text: textPreview,
+    type: plain.type || 'text',
+    isRevoked,
+  };
+}
+
 function messagePayload(message, isUserOnline) {
   const plain = typeof message.toObject === 'function' ? message.toObject() : message;
   const sender = plain.sender?.fullName ? userSummary(plain.sender, isUserOnline) : plain.sender;
@@ -125,6 +145,7 @@ function messagePayload(message, isUserOnline) {
     type: plain.type,
     text: isRevoked ? 'Tin nhắn đã bị thu hồi' : (plain.text || ''),
     attachment: isRevoked ? null : (plain.attachment || null),
+    replyTo: replyToPayload(plain.replyTo, isUserOnline),
     deliveredAt: plain.deliveredAt ? new Date(plain.deliveredAt).toISOString() : null,
     readAt: plain.readAt ? new Date(plain.readAt).toISOString() : null,
     isRevoked,
@@ -137,6 +158,11 @@ async function populateMessage(message) {
   return message.populate([
     { path: 'sender', select: 'fullName username avatarPath lastActiveAt' },
     { path: 'recipient', select: 'fullName username avatarPath lastActiveAt' },
+    {
+      path: 'replyTo',
+      select: 'sender text type attachment revokedAt',
+      populate: { path: 'sender', select: 'fullName username' },
+    },
   ]);
 }
 
@@ -187,6 +213,10 @@ async function persistAudio(file, userId, durationMs) {
 }
 
 function runMessageUpload(request, response, next) {
+  const contentType = request.get('content-type') || '';
+  if (!contentType.toLowerCase().includes('multipart/form-data')) {
+    return next();
+  }
   messageUpload(request, response, (error) => {
     if (!error) return next();
     const tooLarge = error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE';
@@ -209,7 +239,7 @@ async function requireConversationUser(user, friendId, response) {
     return null;
   }
   const friend = await User.findById(friendId);
-  if (!friend || !(await canUsersMessage(user._id, friend._id))) {
+  if (!friend || !areUsersConnected(user, friend)) {
     response.status(403).json({ code: 'CONVERSATION_UNAVAILABLE', message: 'Bạn chỉ có thể nhắn tin với bạn bè đang kết nối.' });
     return null;
   }
@@ -330,9 +360,11 @@ export function createMessageRouter({
           updatedAt: latest.createdAt,
         }];
       });
-      const conversations = (await Promise.all(candidates.map(async (conversation) => (
-        await canUsersMessage(user._id, conversation.friend.id) ? conversation : null
-      )))).filter(Boolean);
+      const userFriendIds = new Set((user.friends || []).map((id) => id.toString()));
+      const userBlockedIds = new Set((user.blockedUsers || []).map((id) => id.toString()));
+      const conversations = candidates.filter((conversation) => (
+        userFriendIds.has(conversation.friend.id) && !userBlockedIds.has(conversation.friend.id)
+      ));
       return response.json({ conversations });
     } catch (error) {
       console.error('Get conversations failed:', error);
@@ -347,7 +379,10 @@ export function createMessageRouter({
       if (!user) return;
       const friend = await requireConversationUser(user, request.params.friendId, response);
       if (!friend) return;
-      await markConversationRead({ user, friend, emitMessageEvent });
+      // Reading state is not needed to render the conversation. Do it in the background
+      // so opening a chat is not delayed by an extra find + update round-trip to MongoDB.
+      void markConversationRead({ user, friend, emitMessageEvent })
+        .catch((error) => console.warn(`Mark message read in background failed: ${error.message}`));
       const key = conversationKeyFor(user._id, friend._id);
       const before = new Date(String(request.query.before || ''));
       const query = { conversationKey: key, deletedFor: { $ne: user._id } };
@@ -359,6 +394,11 @@ export function createMessageRouter({
         .populate([
           { path: 'sender', select: 'fullName username avatarPath lastActiveAt' },
           { path: 'recipient', select: 'fullName username avatarPath lastActiveAt' },
+          {
+            path: 'replyTo',
+            select: 'sender text type attachment revokedAt',
+            populate: { path: 'sender', select: 'fullName username' },
+          },
         ]);
       const hasMore = rows.length > limit;
       if (hasMore) rows.pop();
@@ -370,6 +410,55 @@ export function createMessageRouter({
     } catch (error) {
       console.error('Get conversation failed:', error);
       return response.status(500).json({ code: 'GET_CONVERSATION_FAILED', message: 'Không thể tải tin nhắn lúc này.' });
+    }
+  });
+
+  router.get('/messages/conversations/:friendId/messages/:messageId', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const friend = await requireConversationUser(user, request.params.friendId, response);
+      if (!friend) return;
+      if (!mongoose.isValidObjectId(request.params.messageId)) {
+        return response.status(404).json({ code: 'MESSAGE_NOT_FOUND', message: 'Không tìm thấy tin nhắn gốc.' });
+      }
+
+      const key = conversationKeyFor(user._id, friend._id);
+      const visibleMessageQuery = { conversationKey: key, deletedFor: { $ne: user._id } };
+      const target = await Message.findOne({ ...visibleMessageQuery, _id: request.params.messageId });
+      if (!target) {
+        return response.status(404).json({ code: 'MESSAGE_NOT_FOUND', message: 'Tin nhắn gốc không còn trong cuộc trò chuyện của bạn.' });
+      }
+
+      const [newer, older, hasMoreOlder] = await Promise.all([
+        Message.find({ ...visibleMessageQuery, createdAt: { $gt: target.createdAt } })
+          .sort({ createdAt: 1 })
+          .limit(20),
+        Message.find({ ...visibleMessageQuery, createdAt: { $lt: target.createdAt } })
+          .sort({ createdAt: -1 })
+          .limit(20),
+        Message.exists({ ...visibleMessageQuery, createdAt: { $lt: target.createdAt } }),
+      ]);
+      const rows = [...newer, target, ...older]
+        .sort((first, second) => first.createdAt.getTime() - second.createdAt.getTime());
+      await Message.populate(rows, [
+        { path: 'sender', select: 'fullName username avatarPath lastActiveAt' },
+        { path: 'recipient', select: 'fullName username avatarPath lastActiveAt' },
+        {
+          path: 'replyTo',
+          select: 'sender text type attachment revokedAt',
+          populate: { path: 'sender', select: 'fullName username' },
+        },
+      ]);
+      return response.json({
+        friend: userSummary(friend, isUserOnline),
+        messages: rows.map((message) => messagePayload(message, isUserOnline)),
+        hasMore: Boolean(hasMoreOlder),
+      });
+    } catch (error) {
+      console.error('Get message context failed:', error);
+      return response.status(500).json({ code: 'GET_MESSAGE_CONTEXT_FAILED', message: 'Không thể mở tin nhắn được trích dẫn lúc này.' });
     }
   });
 
@@ -519,6 +608,18 @@ export function createMessageRouter({
         savedAttachmentPath = attachment.path;
       }
 
+      let replyTo = null;
+      const replyToMessageId = request.body?.replyToMessageId || request.body?.replyToId;
+      if (replyToMessageId && mongoose.isValidObjectId(replyToMessageId)) {
+        const parentMsg = await Message.findOne({
+          _id: replyToMessageId,
+          participants: user._id,
+        });
+        if (parentMsg) {
+          replyTo = parentMsg._id;
+        }
+      }
+
       const deliveredAt = isUserOnline(friend._id) ? new Date() : null;
       const message = await Message.create({
         conversationKey: conversationKeyFor(user._id, friend._id),
@@ -528,6 +629,7 @@ export function createMessageRouter({
         type,
         text,
         attachment,
+        replyTo,
         deliveredAt,
       });
       await populateMessage(message);

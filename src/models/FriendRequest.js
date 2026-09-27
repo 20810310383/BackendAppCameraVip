@@ -29,5 +29,8 @@ const friendRequestSchema = new mongoose.Schema(
 );
 
 friendRequestSchema.index({ to: 1, createdAt: -1 });
+friendRequestSchema.index({ from: 1, createdAt: -1 });
 
 export const FriendRequest = mongoose.models.FriendRequest || mongoose.model('FriendRequest', friendRequestSchema);
+
+
