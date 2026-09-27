@@ -5,12 +5,24 @@ export function conversationKeyFor(firstUserId, secondUserId) {
   return [firstUserId.toString(), secondUserId.toString()].sort().join(':');
 }
 
+function userHasId(user, field, targetUserId) {
+  return (user?.[field] || []).some((userId) => userId.equals(targetUserId));
+}
+
+export function messageAccessStatus(firstUser, secondUser) {
+  if (!firstUser || !secondUser || firstUser._id.equals(secondUser._id)) return 'friend_required';
+
+  const isBlocked = userHasId(firstUser, 'blockedUsers', secondUser._id)
+    || userHasId(secondUser, 'blockedUsers', firstUser._id);
+  if (isBlocked) return 'blocked';
+
+  const areFriends = userHasId(firstUser, 'friends', secondUser._id)
+    && userHasId(secondUser, 'friends', firstUser._id);
+  return areFriends ? 'available' : 'friend_required';
+}
+
 export function areUsersConnected(firstUser, secondUser) {
-  if (!firstUser || !secondUser || firstUser._id.equals(secondUser._id)) return false;
-  const areFriends = (firstUser.friends || []).some((friendId) => friendId.equals(secondUser._id));
-  const isBlocked = (firstUser.blockedUsers || []).some((userId) => userId.equals(secondUser._id))
-    || (secondUser.blockedUsers || []).some((userId) => userId.equals(firstUser._id));
-  return areFriends && !isBlocked;
+  return messageAccessStatus(firstUser, secondUser) === 'available';
 }
 
 export async function canUsersMessage(firstUserId, secondUserId) {
@@ -21,4 +33,3 @@ export async function canUsersMessage(firstUserId, secondUserId) {
   ]);
   return areUsersConnected(firstUser, secondUser);
 }
-

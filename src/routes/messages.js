@@ -9,7 +9,7 @@ import sharp from 'sharp';
 import { Message } from '../models/Message.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
-import { areUsersConnected, canUsersMessage, conversationKeyFor } from '../services/message-service.js';
+import { canUsersMessage, conversationKeyFor, messageAccessStatus } from '../services/message-service.js';
 import { isExpoPushToken, sendChatPushNotification } from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
@@ -239,8 +239,23 @@ async function requireConversationUser(user, friendId, response) {
     return null;
   }
   const friend = await User.findById(friendId);
-  if (!friend || !areUsersConnected(user, friend)) {
-    response.status(403).json({ code: 'CONVERSATION_UNAVAILABLE', message: 'Bạn chỉ có thể nhắn tin với bạn bè đang kết nối.' });
+  if (!friend) {
+    response.status(404).json({ code: 'USER_NOT_FOUND', message: 'Không tìm thấy người bạn này.' });
+    return null;
+  }
+  const accessStatus = messageAccessStatus(user, friend);
+  if (accessStatus === 'blocked') {
+    response.status(403).json({
+      code: 'CONVERSATION_BLOCKED',
+      message: 'Không thể nhắn tin vì một trong hai người đã chặn người còn lại.',
+    });
+    return null;
+  }
+  if (accessStatus !== 'available') {
+    response.status(403).json({
+      code: 'CONVERSATION_REQUIRES_FRIENDSHIP',
+      message: 'Bạn cần kết bạn với người này trước khi nhắn tin.',
+    });
     return null;
   }
   return friend;
@@ -337,8 +352,8 @@ export function createMessageRouter({
         { $sort: { 'latest.createdAt': -1 } },
       ]);
       await Message.populate(rows, [
-        { path: 'latest.sender', model: User, select: 'fullName username avatarPath lastActiveAt' },
-        { path: 'latest.recipient', model: User, select: 'fullName username avatarPath lastActiveAt' },
+        { path: 'latest.sender', model: User, select: 'fullName username avatarPath lastActiveAt friends blockedUsers' },
+        { path: 'latest.recipient', model: User, select: 'fullName username avatarPath lastActiveAt friends blockedUsers' },
       ]);
       const candidates = rows.flatMap((row) => {
         const latest = messagePayload(row.latest, isUserOnline);
@@ -352,20 +367,17 @@ export function createMessageRouter({
           return [];
         }
         const friend = latest.sender.id === currentUserId ? latest.recipient : latest.sender;
+        const friendDocument = latest.sender.id === currentUserId ? row.latest.recipient : row.latest.sender;
         return [{
           id: row._id,
           friend,
           latestMessage: latest,
           unreadCount: row.unreadCount,
           updatedAt: latest.createdAt,
+          messagingStatus: messageAccessStatus(user, friendDocument),
         }];
       });
-      const userFriendIds = new Set((user.friends || []).map((id) => id.toString()));
-      const userBlockedIds = new Set((user.blockedUsers || []).map((id) => id.toString()));
-      const conversations = candidates.filter((conversation) => (
-        userFriendIds.has(conversation.friend.id) && !userBlockedIds.has(conversation.friend.id)
-      ));
-      return response.json({ conversations });
+      return response.json({ conversations: candidates });
     } catch (error) {
       console.error('Get conversations failed:', error);
       return response.status(500).json({ code: 'GET_CONVERSATIONS_FAILED', message: 'Không thể tải hội thoại lúc này.' });
