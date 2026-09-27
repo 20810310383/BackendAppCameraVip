@@ -8,6 +8,7 @@ import multer from 'multer';
 import sharp from 'sharp';
 import { ConversationAppearance } from '../models/ConversationAppearance.js';
 import { Message } from '../models/Message.js';
+import { MomentPost } from '../models/MomentPost.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { canUsersMessage, conversationKeyFor, messageAccessStatus } from '../services/message-service.js';
@@ -161,6 +162,7 @@ function messagePayload(message, isUserOnline) {
     type: plain.type,
     text: isRevoked ? 'Tin nhắn đã bị thu hồi' : (plain.text || ''),
     attachment: isRevoked ? null : (plain.attachment || null),
+    momentReply: isRevoked ? null : (plain.momentReply || null),
     replyTo: replyToPayload(plain.replyTo, isUserOnline),
     deliveredAt: plain.deliveredAt ? new Date(plain.deliveredAt).toISOString() : null,
     readAt: plain.readAt ? new Date(plain.readAt).toISOString() : null,
@@ -820,6 +822,35 @@ export function createMessageRouter({
         }
       }
 
+      let momentReply = null;
+      const momentPostId = request.body?.momentPostId;
+      if (momentPostId) {
+        if (!mongoose.isValidObjectId(momentPostId)) {
+          return response.status(422).json({ code: 'INVALID_MOMENT_REPLY', message: 'Khoảnh khắc được trả lời không hợp lệ.' });
+        }
+        const moment = await MomentPost.findOne({ _id: momentPostId, author: friend._id })
+          .select('media caption widget');
+        if (!moment) {
+          return response.status(404).json({ code: 'MOMENT_REPLY_NOT_FOUND', message: 'Khoảnh khắc này không còn khả dụng để trả lời.' });
+        }
+        momentReply = {
+          postId: moment._id,
+          media: {
+            type: moment.media.type,
+            path: moment.media.path,
+            mimeType: moment.media.mimeType,
+            filename: moment.media.filename,
+          },
+          caption: moment.caption || '',
+          widget: moment.widget ? {
+            type: moment.widget.type || '',
+            badge: moment.widget.badge || '',
+            title: moment.widget.title || '',
+            color: moment.widget.color || '',
+          } : undefined,
+        };
+      }
+
       const deliveredAt = isUserOnline(friend._id) ? new Date() : null;
       const message = await Message.create({
         conversationKey: conversationKeyFor(user._id, friend._id),
@@ -829,6 +860,7 @@ export function createMessageRouter({
         type,
         text,
         attachment,
+        momentReply,
         replyTo,
         deliveredAt,
       });

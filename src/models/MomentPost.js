@@ -6,6 +6,7 @@ const mediaSchema = new mongoose.Schema(
     path: { type: String, trim: true, required: true },
     mimeType: { type: String, trim: true, required: true },
     filename: { type: String, trim: true, required: true },
+    thumbnailPath: { type: String, trim: true, default: '' },
     width: { type: Number, min: 0 },
     height: { type: Number, min: 0 },
     durationMs: { type: Number, min: 0 },

@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Router } from 'express';
+import ffmpegPath from 'ffmpeg-static';
 import mongoose from 'mongoose';
 import multer from 'multer';
 import sharp from 'sharp';
@@ -15,8 +17,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const momentUploadDirectory = path.resolve(__dirname, '../../uploads/moments');
 const momentImageDirectory = path.join(momentUploadDirectory, 'images');
 const momentVideoDirectory = path.join(momentUploadDirectory, 'videos');
+const momentThumbnailDirectory = path.join(momentUploadDirectory, 'thumbnails');
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
+const MAX_DAILY_VIDEOS = 10;
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/heic', 'image/heif']);
 
 const momentUpload = multer({
@@ -141,6 +145,36 @@ function sanitizeWidget(value) {
     : null;
 }
 
+function vietnamDayStart() {
+  const vietnamOffset = 7 * 60 * 60 * 1000;
+  const day = 24 * 60 * 60 * 1000;
+  return new Date(Math.floor((Date.now() + vietnamOffset) / day) * day - vietnamOffset);
+}
+
+function runFfmpeg(args) {
+  if (!ffmpegPath) return Promise.reject(new Error('FFmpeg chưa sẵn sàng.'));
+  return new Promise((resolve, reject) => {
+    const command = spawn(ffmpegPath, args, { windowsHide: true });
+    let errorOutput = '';
+    const timer = setTimeout(() => {
+      command.kill('SIGKILL');
+      reject(new Error('Nén video quá thời gian cho phép.'));
+    }, 120_000);
+    command.stderr.on('data', (chunk) => {
+      errorOutput += chunk.toString();
+    });
+    command.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    command.once('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(errorOutput.slice(-600) || `FFmpeg kết thúc với mã ${code}.`));
+    });
+  });
+}
+
 async function persistMedia(file, userId, durationMs) {
   const isImage = IMAGE_MIME_TYPES.has(file.mimetype) || file.mimetype?.startsWith('image/');
   if (isImage) {
@@ -164,21 +198,136 @@ async function persistMedia(file, userId, durationMs) {
   if (file.size > MAX_VIDEO_BYTES) throw new Error('Video tối đa 40 MB.');
   await mkdir(momentVideoDirectory, { recursive: true });
   const extension = path.extname(file.originalname || '').toLowerCase() || '.mp4';
-  const filename = `moment-${userId}-${randomBytes(12).toString('hex')}${extension}`;
-  await writeFile(path.join(momentVideoDirectory, filename), file.buffer);
+  const randomId = randomBytes(12).toString('hex');
+  const sourceFilename = `moment-source-${userId}-${randomId}${extension}`;
+  const sourcePath = path.join(momentVideoDirectory, sourceFilename);
+  const compressedFilename = `moment-${userId}-${randomId}.mp4`;
+  const compressedPath = path.join(momentVideoDirectory, compressedFilename);
+  const silentFilename = `moment-silent-${userId}-${randomId}.mp4`;
+  const silentPath = path.join(momentVideoDirectory, silentFilename);
+  await writeFile(sourcePath, file.buffer);
+
+  let filename = sourceFilename;
+  let mimeType = file.mimetype || 'video/mp4';
+  try {
+    await runFfmpeg([
+      '-y',
+      '-i', sourcePath,
+      '-map', '0:v:0',
+      // Chỉ thu nhỏ video quá lớn, tuyệt đối không phóng to nguồn 720p/1080p gây mờ hình.
+      '-vf', 'scale=min(1280\\,iw):min(1280\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-crf', '22',
+      '-pix_fmt', 'yuv420p',
+      '-an',
+      '-movflags', '+faststart',
+      compressedPath,
+    ]);
+    const compressed = await stat(compressedPath);
+    if (compressed.size > 0) {
+      await unlink(sourcePath).catch(() => undefined);
+      filename = compressedFilename;
+      mimeType = 'video/mp4';
+    } else {
+      await unlink(compressedPath).catch(() => undefined);
+    }
+  } catch (error) {
+    await unlink(compressedPath).catch(() => undefined);
+    try {
+      // Giữ đúng chính sách video không tiếng ngay cả khi lần nén đầu tiên thất bại.
+      await runFfmpeg([
+        '-y',
+        '-i', sourcePath,
+        '-map', '0:v:0',
+        '-c:v', 'copy',
+        '-an',
+        '-movflags', '+faststart',
+        silentPath,
+      ]);
+      const silent = await stat(silentPath);
+      if (silent.size > 0) {
+        await unlink(sourcePath).catch(() => undefined);
+        filename = silentFilename;
+        mimeType = 'video/mp4';
+      }
+    } catch (silentError) {
+      await unlink(silentPath).catch(() => undefined);
+      await unlink(sourcePath).catch(() => undefined);
+      throw new Error(`Không thể xử lý video không tiếng: ${silentError.message || error.message}`);
+    }
+  }
+  let thumbnailPath = '';
+  try {
+    await mkdir(momentThumbnailDirectory, { recursive: true });
+    const thumbnailFilename = `moment-thumb-${userId}-${randomId}.jpg`;
+    const thumbnailFilePath = path.join(momentThumbnailDirectory, thumbnailFilename);
+    await runFfmpeg([
+      '-y',
+      '-ss', '0',
+      '-i', path.join(momentVideoDirectory, filename),
+      '-frames:v', '1',
+      '-vf', 'scale=min(640\\,iw):min(640\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
+      '-q:v', '3',
+      thumbnailFilePath,
+    ]);
+    if ((await stat(thumbnailFilePath)).size > 0) {
+      thumbnailPath = `/uploads/moments/thumbnails/${thumbnailFilename}`;
+    }
+  } catch (error) {
+    console.warn(`Moment video thumbnail skipped: ${error.message}`);
+  }
+
   return {
     type: 'video',
     path: `/uploads/moments/videos/${filename}`,
-    mimeType: file.mimetype || 'video/mp4',
+    mimeType,
     filename,
+    thumbnailPath,
     durationMs: Number.isFinite(Number(durationMs)) ? Math.max(0, Math.round(Number(durationMs))) : undefined,
   };
 }
 
-async function removeLocalMoment(pathname) {
-  if (!pathname?.startsWith('/uploads/moments/')) return;
-  const folder = pathname.includes('/videos/') ? momentVideoDirectory : momentImageDirectory;
-  await unlink(path.join(folder, path.basename(pathname))).catch(() => undefined);
+async function removeLocalMoment(mediaOrPath) {
+  const paths = typeof mediaOrPath === 'string'
+    ? [mediaOrPath]
+    : [mediaOrPath?.path, mediaOrPath?.thumbnailPath];
+  await Promise.all(paths.map(async (pathname) => {
+    if (!pathname?.startsWith('/uploads/moments/')) return;
+    const folder = pathname.includes('/thumbnails/')
+      ? momentThumbnailDirectory
+      : pathname.includes('/videos/') ? momentVideoDirectory : momentImageDirectory;
+    await unlink(path.join(folder, path.basename(pathname))).catch(() => undefined);
+  }));
+}
+
+async function ensureVideoThumbnail(post) {
+  const media = post?.media;
+  if (media?.type !== 'video') return '';
+  if (media.thumbnailPath) return media.thumbnailPath;
+  const videoFilename = path.basename(media.path || '');
+  if (!videoFilename) return '';
+  const thumbnailFilename = `moment-thumb-${path.basename(videoFilename, path.extname(videoFilename))}.jpg`;
+  const thumbnailFilePath = path.join(momentThumbnailDirectory, thumbnailFilename);
+  try {
+    await mkdir(momentThumbnailDirectory, { recursive: true });
+    const exists = await stat(thumbnailFilePath).then((file) => file.size > 0).catch(() => false);
+    if (!exists) {
+      await runFfmpeg([
+        '-y', '-ss', '0', '-i', path.join(momentVideoDirectory, videoFilename), '-frames:v', '1',
+        '-vf', 'scale=min(640\\,iw):min(640\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
+        '-q:v', '3', thumbnailFilePath,
+      ]);
+    }
+    if ((await stat(thumbnailFilePath)).size <= 0) return '';
+    const thumbnailPath = `/uploads/moments/thumbnails/${thumbnailFilename}`;
+    post.media.thumbnailPath = thumbnailPath;
+    await MomentPost.updateOne({ _id: post._id }, { $set: { 'media.thumbnailPath': thumbnailPath } });
+    return thumbnailPath;
+  } catch (error) {
+    console.warn(`Moment video thumbnail unavailable: ${error.message}`);
+    return '';
+  }
 }
 
 function runMomentUpload(request, response, next) {
@@ -222,16 +371,105 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
     }
   });
 
+  router.get('/moments/history', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const before = new Date(String(request.query.before || ''));
+      const limit = Math.max(2, Math.min(Number(request.query.limit) || 12, 40));
+      const audience = [user._id, ...(user.friends || [])];
+      const requestedAuthorId = String(request.query.authorId || '');
+      if (requestedAuthorId && !mongoose.isValidObjectId(requestedAuthorId)) {
+        return response.status(422).json({ code: 'INVALID_MOMENT_AUTHOR', message: 'Bộ lọc người đăng không hợp lệ.' });
+      }
+      if (requestedAuthorId && !audience.some((authorId) => authorId.toString() === requestedAuthorId)) {
+        return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn chỉ có thể xem thư viện của mình hoặc bạn bè.' });
+      }
+      const query = { author: requestedAuthorId ? new mongoose.Types.ObjectId(requestedAuthorId) : { $in: audience } };
+      if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
+      const rows = await MomentPost.find(query)
+        .sort({ createdAt: -1 })
+        .limit(limit + 1)
+        .populate({ path: 'author', select: 'fullName username avatarPath lastActiveAt' });
+      const hasMore = rows.length > limit;
+      if (hasMore) rows.pop();
+      await Promise.all(rows.map((post) => ensureVideoThumbnail(post)));
+      return response.json({ posts: rows.map((post) => postPayload(post, isUserOnline)), hasMore });
+    } catch (error) {
+      console.error('Get moment history failed:', error);
+      return response.status(500).json({ code: 'GET_MOMENT_HISTORY_FAILED', message: 'Không thể tải thư viện khoảnh khắc lúc này.' });
+    }
+  });
+
+  router.get('/moments/daily-stats', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const createdAt = { $gte: vietnamDayStart() };
+      const [imageCount, videoCount] = await Promise.all([
+        MomentPost.countDocuments({ author: user._id, 'media.type': 'image', createdAt }),
+        MomentPost.countDocuments({ author: user._id, 'media.type': 'video', createdAt }),
+      ]);
+      return response.json({
+        imageCount,
+        videoCount,
+        videoLimit: MAX_DAILY_VIDEOS,
+      });
+    } catch (error) {
+      console.error('Get daily moment stats failed:', error);
+      return response.status(500).json({ code: 'GET_MOMENT_DAILY_STATS_FAILED', message: 'Không thể tải hoạt động hôm nay.' });
+    }
+  });
+
+  router.get('/moments/:postId', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      if (!mongoose.isValidObjectId(request.params.postId)) {
+        return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      }
+      const post = await MomentPost.findById(request.params.postId)
+        .populate({ path: 'author', select: 'fullName username avatarPath lastActiveAt' });
+      if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      const isAuthor = post.author._id.toString() === user._id.toString();
+      const isFriend = (user.friends || []).some((friendId) => friendId.toString() === post.author._id.toString());
+      if (!isAuthor && !isFriend) {
+        return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn không có quyền xem khoảnh khắc này.' });
+      }
+      return response.json({ post: postPayload(post, isUserOnline) });
+    } catch (error) {
+      console.error('Get moment failed:', error);
+      return response.status(500).json({ code: 'GET_MOMENT_FAILED', message: 'Không thể tải khoảnh khắc lúc này.' });
+    }
+  });
+
   router.post('/moments', runMomentUpload, async (request, response) => {
     if (!isDatabaseReady()) return databaseUnavailable(response);
-    let savedPath = '';
+    let savedMedia = null;
     try {
       const user = await authenticatedUser(request, response);
       if (!user) return;
       if (!request.file) return response.status(422).json({ code: 'MOMENT_MEDIA_REQUIRED', message: 'Vui lòng chọn ảnh hoặc video để đăng.' });
+      const isVideo = request.file.mimetype?.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(request.file.originalname);
+      if (isVideo) {
+        const todayVideoCount = await MomentPost.countDocuments({
+          author: user._id,
+          'media.type': 'video',
+          createdAt: { $gte: vietnamDayStart() },
+        });
+        if (todayVideoCount >= MAX_DAILY_VIDEOS) {
+          return response.status(429).json({
+            code: 'MOMENT_VIDEO_DAILY_LIMIT',
+            message: 'Mỗi tài khoản chỉ được đăng tối đa 10 video mỗi ngày.',
+          });
+        }
+      }
 
       const media = await persistMedia(request.file, user._id.toString(), request.body?.durationMs);
-      savedPath = media.path;
+      savedMedia = media;
       const post = await MomentPost.create({
         author: user._id,
         media,
@@ -245,9 +483,33 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       for (const recipientId of recipients) emitPostEvent(recipientId, 'moment:new', { post: payload });
       return response.status(201).json({ post: payload });
     } catch (error) {
-      if (savedPath) await removeLocalMoment(savedPath);
+      if (savedMedia) await removeLocalMoment(savedMedia);
       console.error('Create moment failed:', error);
       return response.status(500).json({ code: 'CREATE_MOMENT_FAILED', message: error.message || 'Không thể đăng khoảnh khắc lúc này.' });
+    }
+  });
+
+  router.delete('/moments/:postId', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      if (!mongoose.isValidObjectId(request.params.postId)) {
+        return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      }
+      const post = await MomentPost.findById(request.params.postId).select('author media');
+      if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      if (post.author.toString() !== user._id.toString()) {
+        return response.status(403).json({ code: 'MOMENT_DELETE_FORBIDDEN', message: 'Bạn chỉ có thể xóa khoảnh khắc do chính mình đăng.' });
+      }
+      await MomentPost.deleteOne({ _id: post._id });
+      await removeLocalMoment(post.media);
+      const recipients = new Set([user._id.toString(), ...(user.friends || []).map((id) => id.toString())]);
+      for (const recipientId of recipients) emitPostEvent(recipientId, 'moment:deleted', { postId: post._id.toString() });
+      return response.json({ ok: true, postId: post._id.toString() });
+    } catch (error) {
+      console.error('Delete moment failed:', error);
+      return response.status(500).json({ code: 'DELETE_MOMENT_FAILED', message: 'Không thể xóa khoảnh khắc lúc này.' });
     }
   });
 

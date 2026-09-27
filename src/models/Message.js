@@ -12,6 +12,26 @@ const attachmentSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const momentReplySchema = new mongoose.Schema(
+  {
+    postId: { type: mongoose.Schema.Types.ObjectId, ref: 'MomentPost', required: true },
+    media: {
+      type: { type: String, enum: ['image', 'video'], required: true },
+      path: { type: String, trim: true, required: true },
+      mimeType: { type: String, trim: true, default: '' },
+      filename: { type: String, trim: true, default: '' },
+    },
+    caption: { type: String, trim: true, maxlength: 500, default: '' },
+    widget: {
+      type: { type: String, trim: true, maxlength: 32 },
+      badge: { type: String, trim: true, maxlength: 40 },
+      title: { type: String, trim: true, maxlength: 220 },
+      color: { type: String, trim: true, maxlength: 32 },
+    },
+  },
+  { _id: false },
+);
+
 const messageSchema = new mongoose.Schema(
   {
     conversationKey: { type: String, required: true, index: true },
@@ -25,6 +45,7 @@ const messageSchema = new mongoose.Schema(
     type: { type: String, enum: ['text', 'emoji', 'image', 'audio'], required: true, default: 'text' },
     text: { type: String, trim: true, maxlength: 2000, default: '' },
     attachment: { type: attachmentSchema, default: undefined },
+    momentReply: { type: momentReplySchema, default: null },
     deliveredAt: { type: Date, default: null },
     readAt: { type: Date, default: null },
     revokedAt: { type: Date, default: null },
