@@ -1,0 +1,73 @@
+import mongoose from 'mongoose';
+
+const mediaSchema = new mongoose.Schema(
+  {
+    type: { type: String, enum: ['image', 'video'], required: true },
+    path: { type: String, trim: true, required: true },
+    mimeType: { type: String, trim: true, required: true },
+    filename: { type: String, trim: true, required: true },
+    width: { type: Number, min: 0 },
+    height: { type: Number, min: 0 },
+    durationMs: { type: Number, min: 0 },
+  },
+  { _id: false },
+);
+
+const stickerSchema = new mongoose.Schema(
+  {
+    emoji: { type: String, trim: true, maxlength: 24, required: true },
+    x: { type: Number, min: -4_000, max: 4_000 },
+    y: { type: Number, min: -4_000, max: 4_000 },
+    scale: { type: Number, min: 0.25, max: 4 },
+    rotation: { type: Number, min: -360, max: 360 },
+  },
+  { _id: false },
+);
+
+const postViewSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    viewedAt: { type: Date, default: Date.now, required: true },
+  },
+  { _id: false },
+);
+
+const widgetSchema = new mongoose.Schema(
+  {
+    badge: { type: String, trim: true, maxlength: 40 },
+    title: { type: String, trim: true, maxlength: 220 },
+    subtitle: { type: String, trim: true, maxlength: 160 },
+    type: { type: String, trim: true, maxlength: 32 },
+    icon: { type: String, trim: true, maxlength: 48 },
+    color: { type: String, trim: true, maxlength: 32 },
+    bgTint: { type: String, trim: true, maxlength: 48 },
+    borderColor: { type: String, trim: true, maxlength: 48 },
+    fontStyleId: { type: String, trim: true, maxlength: 32 },
+    fontColor: { type: String, trim: true, maxlength: 24 },
+    glowEffectId: { type: String, trim: true, maxlength: 32 },
+    music: {
+      title: { type: String, trim: true, maxlength: 160 },
+      artist: { type: String, trim: true, maxlength: 160 },
+      coverUrl: { type: String, trim: true, maxlength: 1_200 },
+      coverColors: [{ type: String, trim: true, maxlength: 24 }],
+    },
+  },
+  { _id: false },
+);
+
+const momentPostSchema = new mongoose.Schema(
+  {
+    author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    media: { type: mediaSchema, required: true },
+    caption: { type: String, trim: true, maxlength: 500, default: '' },
+    stickers: { type: [stickerSchema], default: [] },
+    widget: { type: widgetSchema, default: null },
+    views: { type: [postViewSchema], default: [] },
+  },
+  { timestamps: true },
+);
+
+momentPostSchema.index({ createdAt: -1, author: 1 });
+
+export const MomentPost = mongoose.models.MomentPost
+  || mongoose.model('MomentPost', momentPostSchema);

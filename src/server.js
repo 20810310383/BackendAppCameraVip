@@ -16,6 +16,7 @@ import { createProfileRouter, uploadsDirectory } from './routes/profile.js';
 import { createSessionRouter } from './routes/session.js';
 import { createSocialRouter } from './routes/social.js';
 import { createMessageRouter } from './routes/messages.js';
+import { createMomentPostRouter } from './routes/posts.js';
 import { applyChessMove, INITIAL_FEN, sideToMove } from './services/chess-service.js';
 import { canUsersMessage } from './services/message-service.js';
 import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/stockfish-service.js';
@@ -70,6 +71,11 @@ app.use('/api', createMessageRouter({
   isDatabaseReady: () => mongoReady,
   isUserOnline,
   emitMessageEvent: emitSocialEvent,
+}));
+app.use('/api', createMomentPostRouter({
+  isDatabaseReady: () => mongoReady,
+  isUserOnline,
+  emitPostEvent: emitSocialEvent,
 }));
 app.use('/api', createProfileRouter({
   isDatabaseReady: () => mongoReady,

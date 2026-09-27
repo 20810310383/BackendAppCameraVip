@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import multer from 'multer';
 import sharp from 'sharp';
 import { FriendRequest } from '../models/FriendRequest.js';
+import { MomentPost } from '../models/MomentPost.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { hashSessionToken } from '../services/session-service.js';
@@ -69,13 +70,14 @@ async function authenticatedUser(request, response) {
 }
 
 async function profileStats(user) {
-  const [outgoingRequests, incomingRequests] = await Promise.all([
+  const [outgoingRequests, incomingRequests, posts] = await Promise.all([
     FriendRequest.countDocuments({ from: user._id }),
     FriendRequest.countDocuments({ to: user._id }),
+    MomentPost.countDocuments({ author: user._id }),
   ]);
   const friends = (user.friends || []).length;
   return {
-    posts: 0,
+    posts,
     friends,
     following: friends + incomingRequests,
     followers: friends + outgoingRequests,
