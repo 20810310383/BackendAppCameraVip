@@ -18,21 +18,28 @@ const momentUploadDirectory = path.resolve(__dirname, '../../uploads/moments');
 const momentImageDirectory = path.join(momentUploadDirectory, 'images');
 const momentVideoDirectory = path.join(momentUploadDirectory, 'videos');
 const momentThumbnailDirectory = path.join(momentUploadDirectory, 'thumbnails');
+const momentAudioDirectory = path.join(momentUploadDirectory, 'audio');
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
+const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 const MAX_DAILY_VIDEOS = 10;
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/heic', 'image/heif']);
+const AUDIO_MIME_TYPES = new Set(['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/x-m4a', 'audio/flac', 'audio/ogg', 'audio/webm']);
 
 const momentUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_VIDEO_BYTES, files: 1 },
+  limits: { fileSize: MAX_VIDEO_BYTES, files: 2 },
   fileFilter: (_request, file, callback) => {
     const isImage = IMAGE_MIME_TYPES.has(file.mimetype) || file.mimetype?.startsWith('image/');
     const isVideo = file.mimetype?.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(file.originalname);
+    const isAudio = AUDIO_MIME_TYPES.has(file.mimetype)
+      || file.mimetype?.startsWith('audio/')
+      || /\.(mp3|m4a|aac|wav|flac|ogg|opus|webm)$/i.test(file.originalname);
     if (file.fieldname === 'media' && (isImage || isVideo)) return callback(null, true);
-    return callback(new Error('Chỉ hỗ trợ ảnh hoặc video cho khoảnh khắc.'));
+    if (file.fieldname === 'musicAudio' && isAudio) return callback(null, true);
+    return callback(new Error('Tệp khoảnh khắc không hợp lệ.'));
   },
-}).single('media');
+}).fields([{ name: 'media', maxCount: 1 }, { name: 'musicAudio', maxCount: 1 }]);
 
 function databaseUnavailable(response) {
   return response.status(503).json({
@@ -88,6 +95,7 @@ function postPayload(post, isUserOnline) {
     caption: plain.caption || '',
     stickers: Array.isArray(plain.stickers) ? plain.stickers : [],
     widget: plain.widget || null,
+    imageEdit: plain.imageEdit || null,
     viewCount: Array.isArray(plain.views) ? plain.views.length : 0,
     createdAt: new Date(plain.createdAt).toISOString(),
   };
@@ -142,6 +150,42 @@ function parseJsonField(value, fallback) {
   }
 }
 
+function clamp(value, min, max, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
+function sanitizeImageEdit(value) {
+  if (!value || typeof value !== 'object') return null;
+  const filterIds = new Set([
+    'original', 'seoulPink', 'vintage1998', 'cyberpunk', 'sunsetWarm', 'hollywoodTeal',
+    'blackWhiteNoir', 'matchaFresh', 'dreamyGlow', 'caramelLatte', 'coolNordic', 'cherryBlossom',
+  ]);
+  const filterId = typeof value.filterId === 'string' && filterIds.has(value.filterId) ? value.filterId : 'original';
+  const imageEdit = {
+    filterId,
+    filterIntensity: clamp(value.filterIntensity, 0, 100, 100),
+    brightnessLevel: clamp(value.brightnessLevel, -50, 50),
+    contrastLevel: clamp(value.contrastLevel, -50, 50),
+    warmthLevel: clamp(value.warmthLevel, -50, 50),
+    saturationLevel: clamp(value.saturationLevel, -50, 50),
+    vignetteLevel: clamp(value.vignetteLevel, 0, 100),
+    grainLevel: clamp(value.grainLevel, 0, 100),
+    smoothLevel: clamp(value.smoothLevel, 0, 100),
+    sparkleFXEnabled: Boolean(value.sparkleFXEnabled),
+  };
+  const isEdited = imageEdit.filterId !== 'original'
+    || imageEdit.brightnessLevel !== 0 || imageEdit.contrastLevel !== 0 || imageEdit.warmthLevel !== 0
+    || imageEdit.saturationLevel !== 0 || imageEdit.vignetteLevel !== 0 || imageEdit.grainLevel !== 0
+    || imageEdit.smoothLevel !== 0 || imageEdit.sparkleFXEnabled;
+  return isEdited ? imageEdit : null;
+}
+
+function uploadedFile(request, fieldName) {
+  const files = request.files?.[fieldName];
+  return Array.isArray(files) ? files[0] : null;
+}
+
 function sanitizeStickers(value) {
   if (!Array.isArray(value)) return [];
   return value.slice(0, 16).flatMap((sticker) => {
@@ -176,6 +220,9 @@ function sanitizeWidget(value) {
     title: typeof rawMusic.title === 'string' ? rawMusic.title.trim().slice(0, 160) : '',
     artist: typeof rawMusic.artist === 'string' ? rawMusic.artist.trim().slice(0, 160) : '',
     coverUrl: typeof rawMusic.coverUrl === 'string' ? rawMusic.coverUrl.trim().slice(0, 1_200) : '',
+    previewUrl: typeof rawMusic.previewUrl === 'string' && /^https?:\/\//i.test(rawMusic.previewUrl.trim())
+      ? rawMusic.previewUrl.trim().slice(0, 1_200)
+      : '',
     coverColors: Array.isArray(rawMusic.coverColors)
       ? rawMusic.coverColors.filter((item) => typeof item === 'string').slice(0, 2).map((item) => item.trim().slice(0, 24))
       : [],
@@ -328,6 +375,44 @@ async function persistMedia(file, userId, durationMs) {
   };
 }
 
+async function persistMomentAudio(file, userId) {
+  if (!file) return '';
+  if (file.size > MAX_AUDIO_BYTES) throw new Error('Tệp nhạc tối đa 20 MB.');
+  const extensionByMime = {
+    'audio/mpeg': '.mp3', 'audio/mp4': '.m4a', 'audio/aac': '.aac', 'audio/wav': '.wav',
+    'audio/x-m4a': '.m4a', 'audio/flac': '.flac', 'audio/ogg': '.ogg', 'audio/webm': '.webm',
+  };
+  const sourceExtension = path.extname(file.originalname || '').toLowerCase();
+  const extension = /^[.]([a-z0-9]{2,5})$/i.test(sourceExtension)
+    ? sourceExtension
+    : extensionByMime[file.mimetype] || '.m4a';
+  const randomId = randomBytes(12).toString('hex');
+  const sourceFilename = `moment-audio-source-${userId}-${randomId}${extension}`;
+  const sourcePath = path.join(momentAudioDirectory, sourceFilename);
+  const compressedFilename = `moment-audio-${userId}-${randomId}.m4a`;
+  const compressedPath = path.join(momentAudioDirectory, compressedFilename);
+  await mkdir(momentAudioDirectory, { recursive: true });
+  await writeFile(sourcePath, file.buffer);
+
+  try {
+    // AAC 96 kbps is compact enough for moment background music while keeping
+    // voices and most musical detail clear on phone speakers/headphones.
+    await runFfmpeg([
+      '-y', '-i', sourcePath, '-vn', '-c:a', 'aac', '-b:a', '96k',
+      '-ac', '2', '-ar', '44100', '-movflags', '+faststart', compressedPath,
+    ]);
+    if ((await stat(compressedPath)).size > 0) {
+      await unlink(sourcePath).catch(() => undefined);
+      return `/uploads/moments/audio/${compressedFilename}`;
+    }
+  } catch (error) {
+    console.warn(`Moment audio compression skipped: ${error.message}`);
+  }
+
+  await unlink(compressedPath).catch(() => undefined);
+  return `/uploads/moments/audio/${sourceFilename}`;
+}
+
 async function removeLocalMoment(mediaOrPath) {
   const paths = typeof mediaOrPath === 'string'
     ? [mediaOrPath]
@@ -339,6 +424,11 @@ async function removeLocalMoment(mediaOrPath) {
       : pathname.includes('/videos/') ? momentVideoDirectory : momentImageDirectory;
     await unlink(path.join(folder, path.basename(pathname))).catch(() => undefined);
   }));
+}
+
+async function removeLocalMomentAudio(audioPath) {
+  if (!audioPath?.startsWith('/uploads/moments/audio/')) return;
+  await unlink(path.join(momentAudioDirectory, path.basename(audioPath))).catch(() => undefined);
 }
 
 async function ensureVideoThumbnail(post) {
@@ -380,7 +470,7 @@ function runMomentUpload(request, response, next) {
     const tooLarge = error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE';
     return response.status(tooLarge ? 413 : 422).json({
       code: tooLarge ? 'MOMENT_MEDIA_TOO_LARGE' : 'INVALID_MOMENT_MEDIA',
-      message: tooLarge ? 'Video tối đa 40 MB, ảnh tối đa 12 MB.' : error.message || 'Tệp khoảnh khắc không hợp lệ.',
+      message: tooLarge ? 'Video tối đa 40 MB, ảnh tối đa 12 MB và nhạc tối đa 20 MB.' : error.message || 'Tệp khoảnh khắc không hợp lệ.',
     });
   });
 }
@@ -489,10 +579,13 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
   router.post('/moments', runMomentUpload, async (request, response) => {
     if (!isDatabaseReady()) return databaseUnavailable(response);
     let savedMedia = null;
+    let savedMusicAudioPath = '';
     try {
       const user = await authenticatedUser(request, response);
       if (!user) return;
-      if (!request.file) return response.status(422).json({ code: 'MOMENT_MEDIA_REQUIRED', message: 'Vui lòng chọn ảnh hoặc video để đăng.' });
+      const mediaFile = uploadedFile(request, 'media');
+      const musicAudioFile = uploadedFile(request, 'musicAudio');
+      if (!mediaFile) return response.status(422).json({ code: 'MOMENT_MEDIA_REQUIRED', message: 'Vui lòng chọn ảnh hoặc video để đăng.' });
       const rawRecipientIds = request.body?.recipientIds;
       const parsedRecipientIds = rawRecipientIds === undefined ? undefined : parseJsonField(rawRecipientIds, null);
       const audience = selectedMomentRecipients(user, parsedRecipientIds);
@@ -502,7 +595,11 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
           message: 'Danh sách người được chia sẻ không hợp lệ. Hãy chọn lại bạn bè rồi thử lại.',
         });
       }
-      const isVideo = request.file.mimetype?.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(request.file.originalname);
+      const widget = sanitizeWidget(parseJsonField(request.body?.widget, null));
+      if (musicAudioFile && widget?.type !== 'music') {
+        return response.status(422).json({ code: 'MOMENT_AUDIO_WITHOUT_MUSIC', message: 'Tệp nhạc chỉ có thể được gắn với tiện ích Nhạc.' });
+      }
+      const isVideo = mediaFile.mimetype?.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(mediaFile.originalname);
       if (isVideo) {
         const todayVideoCount = await MomentPost.countDocuments({
           author: user._id,
@@ -517,14 +614,19 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         }
       }
 
-      const media = await persistMedia(request.file, user._id.toString(), request.body?.durationMs);
+      const media = await persistMedia(mediaFile, user._id.toString(), request.body?.durationMs);
       savedMedia = media;
+      if (musicAudioFile) {
+        savedMusicAudioPath = await persistMomentAudio(musicAudioFile, user._id.toString());
+        widget.music = { ...(widget.music || {}), previewUrl: savedMusicAudioPath };
+      }
       const post = await MomentPost.create({
         author: user._id,
         media,
         caption: typeof request.body?.caption === 'string' ? request.body.caption.trim().slice(0, 500) : '',
         stickers: sanitizeStickers(parseJsonField(request.body?.stickers, [])),
-        widget: sanitizeWidget(parseJsonField(request.body?.widget, null)),
+        widget,
+        imageEdit: media.type === 'image' ? sanitizeImageEdit(parseJsonField(request.body?.imageEdit, null)) : null,
         shareMode: audience.shareMode,
         recipientIds: audience.recipientIds,
       });
@@ -535,6 +637,7 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       return response.status(201).json({ post: payload });
     } catch (error) {
       if (savedMedia) await removeLocalMoment(savedMedia);
+      if (savedMusicAudioPath) await removeLocalMomentAudio(savedMusicAudioPath);
       console.error('Create moment failed:', error);
       return response.status(500).json({ code: 'CREATE_MOMENT_FAILED', message: error.message || 'Không thể đăng khoảnh khắc lúc này.' });
     }
@@ -548,13 +651,14 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       if (!mongoose.isValidObjectId(request.params.postId)) {
         return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
       }
-      const post = await MomentPost.findById(request.params.postId).select('author media shareMode recipientIds');
+      const post = await MomentPost.findById(request.params.postId).select('author media widget shareMode recipientIds');
       if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
       if (post.author.toString() !== user._id.toString()) {
         return response.status(403).json({ code: 'MOMENT_DELETE_FORBIDDEN', message: 'Bạn chỉ có thể xóa khoảnh khắc do chính mình đăng.' });
       }
       await MomentPost.deleteOne({ _id: post._id });
       await removeLocalMoment(post.media);
+      await removeLocalMomentAudio(post.widget?.music?.previewUrl);
       const recipients = new Set([
         user._id.toString(),
         ...(post.shareMode === 'selected'

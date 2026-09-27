@@ -50,8 +50,25 @@ const widgetSchema = new mongoose.Schema(
       title: { type: String, trim: true, maxlength: 160 },
       artist: { type: String, trim: true, maxlength: 160 },
       coverUrl: { type: String, trim: true, maxlength: 1_200 },
+      previewUrl: { type: String, trim: true, maxlength: 1_200 },
       coverColors: [{ type: String, trim: true, maxlength: 24 }],
     },
+  },
+  { _id: false },
+);
+
+const imageEditSchema = new mongoose.Schema(
+  {
+    filterId: { type: String, trim: true, maxlength: 32, default: 'original' },
+    filterIntensity: { type: Number, min: 0, max: 100, default: 100 },
+    brightnessLevel: { type: Number, min: -50, max: 50, default: 0 },
+    contrastLevel: { type: Number, min: -50, max: 50, default: 0 },
+    warmthLevel: { type: Number, min: -50, max: 50, default: 0 },
+    saturationLevel: { type: Number, min: -50, max: 50, default: 0 },
+    vignetteLevel: { type: Number, min: 0, max: 100, default: 0 },
+    grainLevel: { type: Number, min: 0, max: 100, default: 0 },
+    smoothLevel: { type: Number, min: 0, max: 100, default: 0 },
+    sparkleFXEnabled: { type: Boolean, default: false },
   },
   { _id: false },
 );
@@ -63,6 +80,7 @@ const momentPostSchema = new mongoose.Schema(
     caption: { type: String, trim: true, maxlength: 500, default: '' },
     stickers: { type: [stickerSchema], default: [] },
     widget: { type: widgetSchema, default: null },
+    imageEdit: { type: imageEditSchema, default: null },
     // `all` keeps legacy posts visible to every current friend. A `selected` post
     // is only visible to the friend ids captured when it was published.
     shareMode: { type: String, enum: ['all', 'selected'], default: 'all', index: true },
