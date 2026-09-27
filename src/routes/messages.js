@@ -6,6 +6,7 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import multer from 'multer';
 import sharp from 'sharp';
+import { ConversationAppearance } from '../models/ConversationAppearance.js';
 import { Message } from '../models/Message.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
@@ -17,6 +18,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const messageUploadDirectory = path.resolve(__dirname, '../../uploads/messages');
 const messageImageDirectory = path.join(messageUploadDirectory, 'images');
 const messageAudioDirectory = path.join(messageUploadDirectory, 'audio');
+const conversationWallpaperDirectory = path.resolve(__dirname, '../../uploads/conversation-wallpapers');
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/heic', 'image/heif']);
@@ -63,6 +65,20 @@ const messageUpload = multer({
   { name: 'image', maxCount: 1 },
   { name: 'audio', maxCount: 1 },
 ]);
+
+const conversationWallpaperUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_IMAGE_BYTES, files: 1 },
+  fileFilter: (_request, file, callback) => {
+    const supported = file.fieldname === 'wallpaper'
+      && (IMAGE_MIME_TYPES.has(file.mimetype) || file.mimetype?.startsWith('image/'));
+    if (supported) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error('Chỉ hỗ trợ ảnh làm hình nền cuộc trò chuyện.'));
+  },
+}).single('wallpaper');
 
 function databaseUnavailable(response) {
   return response.status(503).json({
@@ -154,6 +170,19 @@ function messagePayload(message, isUserOnline) {
   };
 }
 
+function conversationWallpaperPayload(appearance) {
+  const wallpaper = appearance?.wallpaper;
+  if (!wallpaper?.path) return null;
+  return {
+    path: wallpaper.path,
+    mimeType: wallpaper.mimeType || 'image/webp',
+    filename: wallpaper.filename || path.basename(wallpaper.path),
+    width: wallpaper.width || undefined,
+    height: wallpaper.height || undefined,
+    updatedAt: wallpaper.updatedAt ? new Date(wallpaper.updatedAt).toISOString() : null,
+  };
+}
+
 async function populateMessage(message) {
   return message.populate([
     { path: 'sender', select: 'fullName username avatarPath lastActiveAt' },
@@ -171,6 +200,11 @@ async function removeLocalAttachment(attachmentPath) {
   await unlink(path.join(messageUploadDirectory, path.basename(path.dirname(attachmentPath)), path.basename(attachmentPath))).catch(() => undefined);
 }
 
+async function removeLocalConversationWallpaper(wallpaperPath) {
+  if (!wallpaperPath?.startsWith('/uploads/conversation-wallpapers/')) return;
+  await unlink(path.join(conversationWallpaperDirectory, path.basename(wallpaperPath))).catch(() => undefined);
+}
+
 async function persistImage(file, userId) {
   if (file.size > MAX_IMAGE_BYTES) throw new Error('Ảnh tối đa 12 MB.');
   await mkdir(messageImageDirectory, { recursive: true });
@@ -185,6 +219,27 @@ async function persistImage(file, userId) {
     filename,
     width: metadata.width || undefined,
     height: metadata.height || undefined,
+  };
+}
+
+async function persistConversationWallpaper(file, userId) {
+  if (file.size > MAX_IMAGE_BYTES) throw new Error('Hình nền tối đa 12 MB.');
+  await mkdir(conversationWallpaperDirectory, { recursive: true });
+  const filename = `wallpaper-${userId}-${randomBytes(12).toString('hex')}.webp`;
+  const destination = path.join(conversationWallpaperDirectory, filename);
+  const image = sharp(file.buffer, { failOn: 'none', limitInputPixels: 36_000_000 }).rotate();
+  const metadata = await image.metadata();
+  await image
+    .resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 88, effort: 4 })
+    .toFile(destination);
+  return {
+    path: `/uploads/conversation-wallpapers/${filename}`,
+    mimeType: 'image/webp',
+    filename,
+    width: metadata.width || undefined,
+    height: metadata.height || undefined,
+    updatedBy: userId,
   };
 }
 
@@ -223,6 +278,21 @@ function runMessageUpload(request, response, next) {
     return response.status(tooLarge ? 413 : 422).json({
       code: tooLarge ? 'ATTACHMENT_TOO_LARGE' : 'INVALID_ATTACHMENT',
       message: tooLarge ? 'Tệp đính kèm quá lớn.' : error.message || 'Tệp đính kèm không hợp lệ.',
+    });
+  });
+}
+
+function runConversationWallpaperUpload(request, response, next) {
+  const contentType = request.get('content-type') || '';
+  if (!contentType.toLowerCase().includes('multipart/form-data')) {
+    return response.status(422).json({ code: 'WALLPAPER_REQUIRED', message: 'Vui lòng chọn ảnh hình nền.' });
+  }
+  return conversationWallpaperUpload(request, response, (error) => {
+    if (!error) return next();
+    const tooLarge = error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE';
+    return response.status(tooLarge ? 413 : 422).json({
+      code: tooLarge ? 'WALLPAPER_TOO_LARGE' : 'INVALID_WALLPAPER',
+      message: tooLarge ? 'Hình nền tối đa 12 MB.' : error.message || 'Hình nền không hợp lệ.',
     });
   });
 }
@@ -384,6 +454,120 @@ export function createMessageRouter({
     }
   });
 
+  router.get('/messages/conversations/:friendId/media', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const friend = await requireConversationUser(user, request.params.friendId, response);
+      if (!friend) return;
+
+      const before = new Date(String(request.query.before || ''));
+      const query = {
+        conversationKey: conversationKeyFor(user._id, friend._id),
+        deletedFor: { $ne: user._id },
+        type: 'image',
+        'attachment.path': { $exists: true },
+      };
+      if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
+      const limit = requestLimit(request.query.limit, 60);
+      const rows = await Message.find(query)
+        .sort({ createdAt: -1 })
+        .limit(limit + 1)
+        .populate([
+          { path: 'sender', select: 'fullName username avatarPath lastActiveAt' },
+          { path: 'recipient', select: 'fullName username avatarPath lastActiveAt' },
+        ]);
+      const hasMore = rows.length > limit;
+      if (hasMore) rows.pop();
+      return response.json({
+        images: rows.map((message) => messagePayload(message, isUserOnline)),
+        hasMore,
+      });
+    } catch (error) {
+      console.error('Get conversation media failed:', error);
+      return response.status(500).json({ code: 'GET_CONVERSATION_MEDIA_FAILED', message: 'Không thể tải ảnh trong cuộc trò chuyện lúc này.' });
+    }
+  });
+
+  router.put('/messages/conversations/:friendId/wallpaper', runConversationWallpaperUpload, async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    let savedWallpaperPath = '';
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const friend = await requireConversationUser(user, request.params.friendId, response);
+      if (!friend) return;
+      if (!request.file) {
+        return response.status(422).json({ code: 'WALLPAPER_REQUIRED', message: 'Vui lòng chọn ảnh hình nền.' });
+      }
+
+      const key = conversationKeyFor(user._id, friend._id);
+      const previous = await ConversationAppearance.findOne({ conversationKey: key });
+      const wallpaper = await persistConversationWallpaper(request.file, user._id.toString());
+      savedWallpaperPath = wallpaper.path;
+      const appearance = await ConversationAppearance.findOneAndUpdate(
+        { conversationKey: key },
+        {
+          $set: {
+            participants: [user._id, friend._id],
+            wallpaper,
+          },
+        },
+        { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true },
+      );
+      if (previous?.wallpaper?.path && previous.wallpaper.path !== wallpaper.path) {
+        await removeLocalConversationWallpaper(previous.wallpaper.path);
+      }
+
+      const payload = conversationWallpaperPayload(appearance);
+      emitMessageEvent(user._id, 'conversation:wallpaper-updated', {
+        conversationKey: key,
+        friendId: friend._id.toString(),
+        wallpaper: payload,
+      });
+      emitMessageEvent(friend._id, 'conversation:wallpaper-updated', {
+        conversationKey: key,
+        friendId: user._id.toString(),
+        wallpaper: payload,
+      });
+      return response.json({ wallpaper: payload });
+    } catch (error) {
+      if (savedWallpaperPath) await removeLocalConversationWallpaper(savedWallpaperPath);
+      console.error('Update conversation wallpaper failed:', error);
+      return response.status(500).json({ code: 'UPDATE_CONVERSATION_WALLPAPER_FAILED', message: 'Không thể cập nhật hình nền cuộc trò chuyện lúc này.' });
+    }
+  });
+
+  router.delete('/messages/conversations/:friendId/wallpaper', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const friend = await requireConversationUser(user, request.params.friendId, response);
+      if (!friend) return;
+
+      const key = conversationKeyFor(user._id, friend._id);
+      const appearance = await ConversationAppearance.findOneAndDelete({ conversationKey: key });
+      if (appearance?.wallpaper?.path) await removeLocalConversationWallpaper(appearance.wallpaper.path);
+
+      emitMessageEvent(user._id, 'conversation:wallpaper-updated', {
+        conversationKey: key,
+        friendId: friend._id.toString(),
+        wallpaper: null,
+      });
+      emitMessageEvent(friend._id, 'conversation:wallpaper-updated', {
+        conversationKey: key,
+        friendId: user._id.toString(),
+        wallpaper: null,
+      });
+      return response.json({ wallpaper: null });
+    } catch (error) {
+      console.error('Remove conversation wallpaper failed:', error);
+      return response.status(500).json({ code: 'REMOVE_CONVERSATION_WALLPAPER_FAILED', message: 'Không thể gỡ hình nền cuộc trò chuyện lúc này.' });
+    }
+  });
+
   router.get('/messages/conversations/:friendId', async (request, response) => {
     if (!isDatabaseReady()) return databaseUnavailable(response);
     try {
@@ -400,24 +584,28 @@ export function createMessageRouter({
       const query = { conversationKey: key, deletedFor: { $ne: user._id } };
       if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
       const limit = requestLimit(request.query.limit);
-      const rows = await Message.find(query)
-        .sort({ createdAt: -1 })
-        .limit(limit + 1)
-        .populate([
-          { path: 'sender', select: 'fullName username avatarPath lastActiveAt' },
-          { path: 'recipient', select: 'fullName username avatarPath lastActiveAt' },
-          {
-            path: 'replyTo',
-            select: 'sender text type attachment revokedAt',
-            populate: { path: 'sender', select: 'fullName username' },
-          },
-        ]);
+      const [rows, appearance] = await Promise.all([
+        Message.find(query)
+          .sort({ createdAt: -1 })
+          .limit(limit + 1)
+          .populate([
+            { path: 'sender', select: 'fullName username avatarPath lastActiveAt' },
+            { path: 'recipient', select: 'fullName username avatarPath lastActiveAt' },
+            {
+              path: 'replyTo',
+              select: 'sender text type attachment revokedAt',
+              populate: { path: 'sender', select: 'fullName username' },
+            },
+          ]),
+        ConversationAppearance.findOne({ conversationKey: key }),
+      ]);
       const hasMore = rows.length > limit;
       if (hasMore) rows.pop();
       return response.json({
         friend: userSummary(friend, isUserOnline),
         messages: rows.reverse().map((message) => messagePayload(message, isUserOnline)),
         hasMore,
+        wallpaper: conversationWallpaperPayload(appearance),
       });
     } catch (error) {
       console.error('Get conversation failed:', error);
