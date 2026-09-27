@@ -828,7 +828,14 @@ export function createMessageRouter({
         if (!mongoose.isValidObjectId(momentPostId)) {
           return response.status(422).json({ code: 'INVALID_MOMENT_REPLY', message: 'Khoảnh khắc được trả lời không hợp lệ.' });
         }
-        const moment = await MomentPost.findOne({ _id: momentPostId, author: friend._id })
+        const moment = await MomentPost.findOne({
+          _id: momentPostId,
+          author: friend._id,
+          $or: [
+            { shareMode: { $ne: 'selected' } },
+            { recipientIds: user._id },
+          ],
+        })
           .select('media caption widget');
         if (!moment) {
           return response.status(404).json({ code: 'MOMENT_REPLY_NOT_FOUND', message: 'Khoảnh khắc này không còn khả dụng để trả lời.' });

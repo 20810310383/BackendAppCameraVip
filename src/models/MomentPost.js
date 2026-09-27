@@ -63,6 +63,10 @@ const momentPostSchema = new mongoose.Schema(
     caption: { type: String, trim: true, maxlength: 500, default: '' },
     stickers: { type: [stickerSchema], default: [] },
     widget: { type: widgetSchema, default: null },
+    // `all` keeps legacy posts visible to every current friend. A `selected` post
+    // is only visible to the friend ids captured when it was published.
+    shareMode: { type: String, enum: ['all', 'selected'], default: 'all', index: true },
+    recipientIds: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
     views: { type: [postViewSchema], default: [] },
   },
   { timestamps: true },

@@ -93,6 +93,46 @@ function postPayload(post, isUserOnline) {
   };
 }
 
+function momentAudienceQuery(user, requestedAuthorId = null) {
+  const currentAudience = requestedAuthorId
+    ? { author: requestedAuthorId }
+    : { author: { $in: [user._id, ...(user.friends || [])] } };
+
+  return {
+    $and: [
+      currentAudience,
+      {
+        $or: [
+          { author: user._id },
+          // Existing posts have no shareMode and remain visible to all friends.
+          { shareMode: { $ne: 'selected' } },
+          { recipientIds: user._id },
+        ],
+      },
+    ],
+  };
+}
+
+function canUserViewMoment(post, user) {
+  const authorId = post.author?._id?.toString?.() || post.author?.toString?.();
+  if (!authorId) return false;
+  if (authorId === user._id.toString()) return true;
+  const isFriend = (user.friends || []).some((friendId) => friendId.toString() === authorId);
+  if (!isFriend || post.shareMode !== 'selected') return isFriend;
+  return (post.recipientIds || []).some((recipientId) => recipientId.toString() === user._id.toString());
+}
+
+function selectedMomentRecipients(user, recipientIds) {
+  if (recipientIds === undefined) {
+    return { shareMode: 'all', recipientIds: [], eventRecipients: (user.friends || []).map((id) => id.toString()) };
+  }
+  if (!Array.isArray(recipientIds)) return null;
+  const friendIds = new Set((user.friends || []).map((id) => id.toString()));
+  const uniqueIds = [...new Set(recipientIds)];
+  if (uniqueIds.some((id) => typeof id !== 'string' || !mongoose.isValidObjectId(id) || !friendIds.has(id))) return null;
+  return { shareMode: 'selected', recipientIds: uniqueIds, eventRecipients: uniqueIds };
+}
+
 function parseJsonField(value, fallback) {
   if (typeof value !== 'string' || !value.trim()) return fallback;
   try {
@@ -355,8 +395,7 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       if (!user) return;
       const before = new Date(String(request.query.before || ''));
       const limit = Math.max(1, Math.min(Number(request.query.limit) || 20, 40));
-      const audience = [user._id, ...(user.friends || [])];
-      const query = { author: { $in: audience } };
+      const query = momentAudienceQuery(user);
       if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
       const rows = await MomentPost.find(query)
         .sort({ createdAt: -1 })
@@ -386,7 +425,10 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       if (requestedAuthorId && !audience.some((authorId) => authorId.toString() === requestedAuthorId)) {
         return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn chỉ có thể xem thư viện của mình hoặc bạn bè.' });
       }
-      const query = { author: requestedAuthorId ? new mongoose.Types.ObjectId(requestedAuthorId) : { $in: audience } };
+      const query = momentAudienceQuery(
+        user,
+        requestedAuthorId ? new mongoose.Types.ObjectId(requestedAuthorId) : null,
+      );
       if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
       const rows = await MomentPost.find(query)
         .sort({ createdAt: -1 })
@@ -434,9 +476,7 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       const post = await MomentPost.findById(request.params.postId)
         .populate({ path: 'author', select: 'fullName username avatarPath lastActiveAt' });
       if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
-      const isAuthor = post.author._id.toString() === user._id.toString();
-      const isFriend = (user.friends || []).some((friendId) => friendId.toString() === post.author._id.toString());
-      if (!isAuthor && !isFriend) {
+      if (!canUserViewMoment(post, user)) {
         return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn không có quyền xem khoảnh khắc này.' });
       }
       return response.json({ post: postPayload(post, isUserOnline) });
@@ -453,6 +493,15 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       const user = await authenticatedUser(request, response);
       if (!user) return;
       if (!request.file) return response.status(422).json({ code: 'MOMENT_MEDIA_REQUIRED', message: 'Vui lòng chọn ảnh hoặc video để đăng.' });
+      const rawRecipientIds = request.body?.recipientIds;
+      const parsedRecipientIds = rawRecipientIds === undefined ? undefined : parseJsonField(rawRecipientIds, null);
+      const audience = selectedMomentRecipients(user, parsedRecipientIds);
+      if (!audience) {
+        return response.status(422).json({
+          code: 'INVALID_MOMENT_RECIPIENTS',
+          message: 'Danh sách người được chia sẻ không hợp lệ. Hãy chọn lại bạn bè rồi thử lại.',
+        });
+      }
       const isVideo = request.file.mimetype?.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(request.file.originalname);
       if (isVideo) {
         const todayVideoCount = await MomentPost.countDocuments({
@@ -476,10 +525,12 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         caption: typeof request.body?.caption === 'string' ? request.body.caption.trim().slice(0, 500) : '',
         stickers: sanitizeStickers(parseJsonField(request.body?.stickers, [])),
         widget: sanitizeWidget(parseJsonField(request.body?.widget, null)),
+        shareMode: audience.shareMode,
+        recipientIds: audience.recipientIds,
       });
       await post.populate({ path: 'author', select: 'fullName username avatarPath lastActiveAt' });
       const payload = postPayload(post, isUserOnline);
-      const recipients = new Set([user._id.toString(), ...(user.friends || []).map((id) => id.toString())]);
+      const recipients = new Set([user._id.toString(), ...audience.eventRecipients]);
       for (const recipientId of recipients) emitPostEvent(recipientId, 'moment:new', { post: payload });
       return response.status(201).json({ post: payload });
     } catch (error) {
@@ -497,14 +548,19 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       if (!mongoose.isValidObjectId(request.params.postId)) {
         return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
       }
-      const post = await MomentPost.findById(request.params.postId).select('author media');
+      const post = await MomentPost.findById(request.params.postId).select('author media shareMode recipientIds');
       if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
       if (post.author.toString() !== user._id.toString()) {
         return response.status(403).json({ code: 'MOMENT_DELETE_FORBIDDEN', message: 'Bạn chỉ có thể xóa khoảnh khắc do chính mình đăng.' });
       }
       await MomentPost.deleteOne({ _id: post._id });
       await removeLocalMoment(post.media);
-      const recipients = new Set([user._id.toString(), ...(user.friends || []).map((id) => id.toString())]);
+      const recipients = new Set([
+        user._id.toString(),
+        ...(post.shareMode === 'selected'
+          ? (post.recipientIds || []).map((id) => id.toString())
+          : (user.friends || []).map((id) => id.toString())),
+      ]);
       for (const recipientId of recipients) emitPostEvent(recipientId, 'moment:deleted', { postId: post._id.toString() });
       return response.json({ ok: true, postId: post._id.toString() });
     } catch (error) {
@@ -521,16 +577,15 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       if (!mongoose.isValidObjectId(request.params.postId)) {
         return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
       }
-      const post = await MomentPost.findById(request.params.postId).select('author views');
+      const post = await MomentPost.findById(request.params.postId).select('author shareMode recipientIds views');
       if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
 
-      const isAuthor = post.author.toString() === user._id.toString();
-      const isFriend = (user.friends || []).some((friendId) => friendId.toString() === post.author.toString());
-      if (!isAuthor && !isFriend) {
+      if (!canUserViewMoment(post, user)) {
         return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn không có quyền xem khoảnh khắc này.' });
       }
       const viewedAt = new Date();
       let recordedNewView = false;
+      const isAuthor = post.author.toString() === user._id.toString();
       if (!isAuthor) {
         const updateResult = await MomentPost.updateOne(
           { _id: post._id, 'views.user': { $ne: user._id } },
