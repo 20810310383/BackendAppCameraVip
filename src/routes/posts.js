@@ -545,8 +545,12 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       const limit = Math.max(2, Math.min(Number(request.query.limit) || 12, 40));
       const audience = [user._id, ...(user.friends || [])];
       const requestedAuthorId = String(request.query.authorId || '');
+      const requestedMediaType = String(request.query.mediaType || '');
       if (requestedAuthorId && !mongoose.isValidObjectId(requestedAuthorId)) {
         return response.status(422).json({ code: 'INVALID_MOMENT_AUTHOR', message: 'Bộ lọc người đăng không hợp lệ.' });
+      }
+      if (requestedMediaType && !['image', 'video'].includes(requestedMediaType)) {
+        return response.status(422).json({ code: 'INVALID_MOMENT_MEDIA_TYPE', message: 'Loại khoảnh khắc không hợp lệ.' });
       }
       if (requestedAuthorId && !audience.some((authorId) => authorId.toString() === requestedAuthorId)) {
         return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn chỉ có thể xem thư viện của mình hoặc bạn bè.' });
@@ -556,6 +560,7 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         requestedAuthorId ? new mongoose.Types.ObjectId(requestedAuthorId) : null,
       );
       if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
+      if (requestedMediaType) query['media.type'] = requestedMediaType;
       const rows = await MomentPost.find(query)
         .sort({ createdAt: -1 })
         .limit(limit + 1)
