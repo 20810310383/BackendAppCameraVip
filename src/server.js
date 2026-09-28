@@ -9,6 +9,7 @@ import { Game } from './models/Game.js';
 import { FriendRequest } from './models/FriendRequest.js';
 import { Message } from './models/Message.js';
 import { Session } from './models/Session.js';
+import { migrateSharedChainIndexes } from './models/SharedChain.js';
 import { User } from './models/User.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createPasswordResetRouter } from './routes/password-reset.js';
@@ -17,6 +18,7 @@ import { createSessionRouter } from './routes/session.js';
 import { createSocialRouter } from './routes/social.js';
 import { createMessageRouter } from './routes/messages.js';
 import { createMomentPostRouter } from './routes/posts.js';
+import { createSharedChainRouter } from './routes/shared-chain.js';
 import { applyChessMove, INITIAL_FEN, sideToMove } from './services/chess-service.js';
 import { canUsersMessage } from './services/message-service.js';
 import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/stockfish-service.js';
@@ -76,6 +78,11 @@ app.use('/api', createMomentPostRouter({
   isDatabaseReady: () => mongoReady,
   isUserOnline,
   emitPostEvent: emitSocialEvent,
+}));
+app.use('/api', createSharedChainRouter({
+  isDatabaseReady: () => mongoReady,
+  isUserOnline,
+  emitSharedChainEvent: emitSocialEvent,
 }));
 app.use('/api', createProfileRouter({
   isDatabaseReady: () => mongoReady,
@@ -462,6 +469,7 @@ async function start() {
         User.createIndexes(),
         FriendRequest.createIndexes(),
         Message.createIndexes(),
+        migrateSharedChainIndexes(),
       ]);
       void verifyEmailTransport()
         .then((ready) => console.log(ready ? 'Email transport is ready' : 'Email transport is not configured'))

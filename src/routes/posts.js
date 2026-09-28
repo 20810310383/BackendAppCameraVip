@@ -9,6 +9,7 @@ import mongoose from 'mongoose';
 import multer from 'multer';
 import sharp from 'sharp';
 import { MomentPost } from '../models/MomentPost.js';
+import { SharedChain } from '../models/SharedChain.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { hashSessionToken } from '../services/session-service.js';
@@ -96,6 +97,9 @@ function postPayload(post, isUserOnline) {
     stickers: Array.isArray(plain.stickers) ? plain.stickers : [],
     widget: plain.widget || null,
     imageEdit: plain.imageEdit || null,
+    timezoneOffsetMinutes: Number.isFinite(plain.timezoneOffsetMinutes) ? plain.timezoneOffsetMinutes : 0,
+    authorLocalTime: plain.authorLocalTime || '',
+    authorLocalDate: plain.authorLocalDate || '',
     viewCount: Array.isArray(plain.views) ? plain.views.length : 0,
     createdAt: new Date(plain.createdAt).toISOString(),
   };
@@ -153,6 +157,27 @@ function parseJsonField(value, fallback) {
 function clamp(value, min, max, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
+function authorLocalClock(value) {
+  return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : '';
+}
+
+function authorLocalDay(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
+}
+
+async function emitSharedChainPostEvent(authorId, event, payload, emitPostEvent) {
+  try {
+    const chains = await SharedChain.find({ 'members.user': authorId }).select('_id members');
+    for (const chain of chains) {
+      const memberIds = new Set((chain.members || []).map((member) => member.user?.toString()).filter(Boolean));
+      for (const memberId of memberIds) emitPostEvent(memberId, event, { chainId: chain._id.toString(), ...payload });
+    }
+  } catch (error) {
+    // A realtime refresh must never make an already-saved moment look failed.
+    console.error('Emit shared chain post event failed:', error);
+  }
 }
 
 function sanitizeImageEdit(value) {
@@ -485,7 +510,18 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       if (!user) return;
       const before = new Date(String(request.query.before || ''));
       const limit = Math.max(1, Math.min(Number(request.query.limit) || 20, 40));
-      const query = momentAudienceQuery(user);
+      const audience = [user._id, ...(user.friends || [])];
+      const requestedAuthorId = String(request.query.authorId || '');
+      if (requestedAuthorId && !mongoose.isValidObjectId(requestedAuthorId)) {
+        return response.status(422).json({ code: 'INVALID_MOMENT_AUTHOR', message: 'Bộ lọc người đăng không hợp lệ.' });
+      }
+      if (requestedAuthorId && !audience.some((authorId) => authorId.toString() === requestedAuthorId)) {
+        return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn chỉ có thể lọc khoảnh khắc của mình hoặc bạn bè.' });
+      }
+      const query = momentAudienceQuery(
+        user,
+        requestedAuthorId ? new mongoose.Types.ObjectId(requestedAuthorId) : null,
+      );
       if (Number.isFinite(before.getTime())) query.createdAt = { $lt: before };
       const rows = await MomentPost.find(query)
         .sort({ createdAt: -1 })
@@ -627,6 +663,9 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         stickers: sanitizeStickers(parseJsonField(request.body?.stickers, [])),
         widget,
         imageEdit: media.type === 'image' ? sanitizeImageEdit(parseJsonField(request.body?.imageEdit, null)) : null,
+        timezoneOffsetMinutes: clamp(request.body?.timezoneOffsetMinutes, -840, 840),
+        authorLocalTime: authorLocalClock(request.body?.authorLocalTime),
+        authorLocalDate: authorLocalDay(request.body?.authorLocalDate),
         shareMode: audience.shareMode,
         recipientIds: audience.recipientIds,
       });
@@ -634,6 +673,7 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       const payload = postPayload(post, isUserOnline);
       const recipients = new Set([user._id.toString(), ...audience.eventRecipients]);
       for (const recipientId of recipients) emitPostEvent(recipientId, 'moment:new', { post: payload });
+      await emitSharedChainPostEvent(user._id, 'shared-chain:post-created', {}, emitPostEvent);
       return response.status(201).json({ post: payload });
     } catch (error) {
       if (savedMedia) await removeLocalMoment(savedMedia);
@@ -666,6 +706,7 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
           : (user.friends || []).map((id) => id.toString())),
       ]);
       for (const recipientId of recipients) emitPostEvent(recipientId, 'moment:deleted', { postId: post._id.toString() });
+      await emitSharedChainPostEvent(user._id, 'shared-chain:post-deleted', {}, emitPostEvent);
       return response.json({ ok: true, postId: post._id.toString() });
     } catch (error) {
       console.error('Delete moment failed:', error);

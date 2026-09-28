@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { FriendRequest } from '../models/FriendRequest.js';
+import { SharedChain } from '../models/SharedChain.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { hashSessionToken } from '../services/session-service.js';
@@ -68,6 +69,10 @@ function friendPairKey(firstUserId, secondUserId) {
   return [firstUserId.toString(), secondUserId.toString()].sort().join(':');
 }
 
+function idOf(value) {
+  return value?._id?.toString?.() || value?.id?.toString?.() || value?.toString?.() || '';
+}
+
 async function friendList(userId, isUserOnline) {
   const [user, outgoingRequests, incomingRequests] = await Promise.all([
     User.findById(userId).populate({
@@ -132,6 +137,55 @@ export function createSocialRouter({
   isUserOnline = () => false,
 }) {
   const router = Router();
+
+  const emitSharedChainUpdate = (chain) => {
+    const recipients = new Set([
+      idOf(chain.owner),
+      ...(chain.members || []).map((member) => idOf(member.user)),
+      ...(chain.pendingInvitations || []).map((invitation) => idOf(invitation.user)),
+      ...(chain.pendingJoinRequests || []).map((joinRequest) => idOf(joinRequest.user)),
+    ].filter(Boolean));
+    for (const recipientId of recipients) emitSocialEvent(recipientId, 'shared-chain:updated', { chainId: chain._id.toString() });
+  };
+
+  const releaseSharedChainInvitationsAfterFriendship = async (friendRequestId) => {
+    const chains = await SharedChain.find({
+      pendingInvitations: { $elemMatch: { awaitingFriendship: true, friendRequest: friendRequestId } },
+    });
+    for (const chain of chains) {
+      const invitedUserIds = [];
+      for (const invitation of chain.pendingInvitations || []) {
+        if (!invitation.awaitingFriendship || idOf(invitation.friendRequest) !== friendRequestId.toString()) continue;
+        invitation.awaitingFriendship = false;
+        invitation.isFriendOfOwner = true;
+        invitation.friendRequest = null;
+        invitedUserIds.push(idOf(invitation.user));
+      }
+      if (!invitedUserIds.length) continue;
+      // eslint-disable-next-line no-await-in-loop
+      await chain.save();
+      emitSharedChainUpdate(chain);
+      for (const invitedUserId of invitedUserIds) {
+        emitSocialEvent(invitedUserId, 'shared-chain:invitation', { chainId: chain._id.toString() });
+      }
+    }
+  };
+
+  const discardSharedChainInvitationsForFriendRequest = async (friendRequestId) => {
+    const chains = await SharedChain.find({
+      pendingInvitations: { $elemMatch: { awaitingFriendship: true, friendRequest: friendRequestId } },
+    });
+    for (const chain of chains) {
+      const originalCount = (chain.pendingInvitations || []).length;
+      chain.pendingInvitations = (chain.pendingInvitations || []).filter((invitation) => (
+        !invitation.awaitingFriendship || idOf(invitation.friendRequest) !== friendRequestId.toString()
+      ));
+      if (chain.pendingInvitations.length === originalCount) continue;
+      // eslint-disable-next-line no-await-in-loop
+      await chain.save();
+      emitSharedChainUpdate(chain);
+    }
+  };
 
   const handleBlockUser = async (request, response) => {
     if (!isDatabaseReady()) return databaseUnavailable(response);
@@ -433,6 +487,7 @@ export function createSocialRouter({
         User.updateOne({ _id: friendRequest.from }, { $addToSet: { friends: user._id } }),
         FriendRequest.deleteOne({ _id: friendRequest._id }),
       ]);
+      await releaseSharedChainInvitationsAfterFriendship(friendRequest._id);
       emitSocialEvent(user._id, 'social:friends-updated', { reason: 'friend_request_accepted' });
       emitSocialEvent(friendRequest.from, 'social:friend-request-accepted', { userId: user._id.toString() });
       return response.json({
@@ -459,6 +514,7 @@ export function createSocialRouter({
       }
       const wasSender = deleted.from.equals(user._id);
       const otherUserId = wasSender ? deleted.to : deleted.from;
+      await discardSharedChainInvitationsForFriendRequest(deleted._id);
       emitSocialEvent(user._id, 'social:friends-updated', { reason: wasSender ? 'friend_request_cancelled' : 'friend_request_declined' });
       emitSocialEvent(otherUserId, 'social:friends-updated', { reason: wasSender ? 'friend_request_cancelled' : 'friend_request_declined' });
       return response.json({

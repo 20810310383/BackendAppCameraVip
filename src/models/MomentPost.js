@@ -81,6 +81,11 @@ const momentPostSchema = new mongoose.Schema(
     stickers: { type: [stickerSchema], default: [] },
     widget: { type: widgetSchema, default: null },
     imageEdit: { type: imageEditSchema, default: null },
+    // The offset at publication time lets shared timelines display the time as
+    // experienced by the author, instead of silently converting to the viewer's zone.
+    timezoneOffsetMinutes: { type: Number, min: -840, max: 840, default: 0 },
+    authorLocalTime: { type: String, trim: true, match: /^([01]\d|2[0-3]):[0-5]\d$/, default: '' },
+    authorLocalDate: { type: String, trim: true, match: /^\d{4}-\d{2}-\d{2}$/, default: '' },
     // `all` keeps legacy posts visible to every current friend. A `selected` post
     // is only visible to the friend ids captured when it was published.
     shareMode: { type: String, enum: ['all', 'selected'], default: 'all', index: true },
