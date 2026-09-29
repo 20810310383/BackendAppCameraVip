@@ -521,9 +521,10 @@ export function createSharedChainRouter({ isDatabaseReady, isUserOnline = () => 
       const query = {
         author: requestedAuthorId ? new mongoose.Types.ObjectId(requestedAuthorId) : { $in: memberIds },
         $or: [
-          { author: user._id },
-          { shareMode: { $ne: 'selected' } },
-          { recipientIds: user._id },
+          { sharedChainIds: chain._id },
+          // Posts from before manual selection existed keep their previous
+          // automatic visibility until somebody explicitly removes them.
+          { sharedChainSelectionStarted: { $ne: true }, sharedChainExcludedIds: { $ne: chain._id } },
         ],
       };
       if (mediaType !== 'all') query['media.type'] = mediaType;
@@ -538,6 +539,79 @@ export function createSharedChainRouter({ isDatabaseReady, isUserOnline = () => 
     } catch (error) {
       console.error('Get shared chain posts failed:', error);
       return response.status(500).json({ code: 'GET_SHARED_CHAIN_POSTS_FAILED', message: 'Không thể tải khoảnh khắc của nhóm.' });
+    }
+  });
+
+  router.get('/shared-chains/:chainId/post-candidates', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const chain = await findMemberChain(request.params.chainId, user, response);
+      if (!chain) return;
+      const memberIds = (chain.members || []).map((member) => member.user);
+      const canManage = idOf(chain.owner) === user._id.toString();
+      const author = canManage ? { $in: memberIds } : user._id;
+      const rows = await MomentPost.find({ author })
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .populate({ path: 'author', select: 'fullName username avatarPath lastActiveAt' })
+        .lean();
+      return response.json({
+        posts: rows.map((post) => {
+          const isExplicitlyIncluded = (post.sharedChainIds || []).some((chainId) => idOf(chainId) === chain._id.toString());
+          const isLegacyIncluded = post.sharedChainSelectionStarted !== true
+            && !(post.sharedChainExcludedIds || []).some((chainId) => idOf(chainId) === chain._id.toString());
+          return { ...postPayload(post, isUserOnline), included: isExplicitlyIncluded || isLegacyIncluded };
+        }),
+      });
+    } catch (error) {
+      console.error('Get shared chain post candidates failed:', error);
+      return response.status(500).json({ code: 'GET_SHARED_CHAIN_POST_CANDIDATES_FAILED', message: 'Không thể tải bài đăng để chọn.' });
+    }
+  });
+
+  router.put('/shared-chains/:chainId/posts/:postId', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      if (!assertValidChainId(response, request.params.chainId) || !mongoose.isValidObjectId(request.params.postId)) {
+        if (mongoose.isValidObjectId(request.params.chainId)) response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy bài đăng.' });
+        return;
+      }
+      if (typeof request.body?.included !== 'boolean') {
+        return response.status(422).json({ code: 'SHARED_CHAIN_POST_SELECTION_INVALID', message: 'Trạng thái chọn bài đăng không hợp lệ.' });
+      }
+      const chain = await findMemberChain(request.params.chainId, user, response);
+      if (!chain) return;
+      const post = await MomentPost.findById(request.params.postId).select('author sharedChainIds sharedChainExcludedIds');
+      if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy bài đăng.' });
+      if (!isCurrentMember(chain, post.author)) {
+        return response.status(403).json({ code: 'SHARED_CHAIN_POST_AUTHOR_FORBIDDEN', message: 'Chỉ có thể chọn bài đăng của thành viên hiện tại trong nhóm.' });
+      }
+      const canManage = idOf(chain.owner) === user._id.toString();
+      if (!canManage && idOf(post.author) !== user._id.toString()) {
+        return response.status(403).json({ code: 'SHARED_CHAIN_POST_MANAGE_FORBIDDEN', message: 'Bạn chỉ có thể thêm hoặc bỏ bài đăng của chính mình.' });
+      }
+      const update = request.body.included
+        ? { $addToSet: { sharedChainIds: chain._id }, $pull: { sharedChainExcludedIds: chain._id } }
+        : { $pull: { sharedChainIds: chain._id }, $addToSet: { sharedChainExcludedIds: chain._id } };
+      await MomentPost.updateOne({ _id: post._id }, update);
+      response.json({ ok: true, postId: post._id.toString(), included: request.body.included });
+      // Send realtime refreshes only after the caller has been given the result
+      // of its own action, avoiding a local socket refresh racing the HTTP reply.
+      try {
+        emitToMembers(chain, 'shared-chain:posts-updated', { postId: post._id.toString(), included: request.body.included });
+      } catch (error) {
+        // The selection has already been saved and acknowledged. A socket
+        // failure must not turn that completed HTTP request into an error.
+        console.error('Emit shared chain post selection event failed:', error);
+      }
+      return;
+    } catch (error) {
+      console.error('Update shared chain post selection failed:', error);
+      return response.status(500).json({ code: 'UPDATE_SHARED_CHAIN_POST_SELECTION_FAILED', message: 'Không thể cập nhật bài đăng trong nhóm.' });
     }
   });
 

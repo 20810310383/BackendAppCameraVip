@@ -19,7 +19,14 @@ import { createSocialRouter } from './routes/social.js';
 import { createMessageRouter } from './routes/messages.js';
 import { createMomentPostRouter } from './routes/posts.js';
 import { createSharedChainRouter } from './routes/shared-chain.js';
+import { createLocationRouter } from './routes/location.js';
 import { applyChessMove, INITIAL_FEN, sideToMove } from './services/chess-service.js';
+import {
+  emitLocationToRecipients,
+  getFriendLocationSnapshot,
+  setLocationSharing,
+  updateSharedLocation,
+} from './services/location-sharing-service.js';
 import { canUsersMessage } from './services/message-service.js';
 import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/stockfish-service.js';
 import { verifyEmailTransport } from './services/email-service.js';
@@ -62,7 +69,10 @@ app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDirectory, { immutable: true, maxAge: '30d' }));
 app.use('/api/auth', createAuthRouter({ isDatabaseReady: () => mongoReady }));
-app.use('/api/auth', createSessionRouter({ isDatabaseReady: () => mongoReady }));
+app.use('/api/auth', createSessionRouter({
+  isDatabaseReady: () => mongoReady,
+  emitSocialEvent,
+}));
 app.use('/api/auth', createPasswordResetRouter({ isDatabaseReady: () => mongoReady }));
 app.use('/api', createSocialRouter({
   isDatabaseReady: () => mongoReady,
@@ -83,6 +93,10 @@ app.use('/api', createSharedChainRouter({
   isDatabaseReady: () => mongoReady,
   isUserOnline,
   emitSharedChainEvent: emitSocialEvent,
+}));
+app.use('/api', createLocationRouter({
+  isDatabaseReady: () => mongoReady,
+  emitSocialEvent,
 }));
 app.use('/api', createProfileRouter({
   isDatabaseReady: () => mongoReady,
@@ -200,7 +214,9 @@ io.on('connection', (socket) => {
       if (!session) return respond({ error: 'Phiên đăng nhập đã hết hạn.' });
 
       const previousUserId = socket.data.socialUserId;
-      if (previousUserId && previousUserId !== session.userId.toString()) socket.leave(socialRoom(previousUserId));
+      if (previousUserId && previousUserId !== session.userId.toString()) {
+        socket.leave(socialRoom(previousUserId));
+      }
 
       socket.data.socialUserId = session.userId.toString();
       socket.join(socialRoom(session.userId));
@@ -225,6 +241,50 @@ io.on('connection', (socket) => {
       });
     } catch (error) {
       console.warn(`Message typing update failed: ${error.message}`);
+    }
+  });
+
+  socket.on('map:location-snapshot', async (_payload = {}, callback) => {
+    const respond = callbackOrNoop(callback);
+    try {
+      if (!mongoReady || !socket.data.socialUserId) return respond({ error: 'Vui lòng kết nối tài khoản trước.' });
+      return respond({ ok: true, locations: await getFriendLocationSnapshot(socket.data.socialUserId) });
+    } catch (error) {
+      console.warn(`Live location snapshot failed: ${error.message}`);
+      return respond({ error: 'Không thể tải vị trí bạn bè lúc này.' });
+    }
+  });
+
+  socket.on('map:location-update', async (payload = {}, callback) => {
+    const respond = callbackOrNoop(callback);
+    try {
+      if (!mongoReady || !socket.data.socialUserId) return respond({ error: 'Vui lòng kết nối tài khoản trước.' });
+
+      const user = await User.findById(socket.data.socialUserId).select('fullName username avatarPath friends locationSharingEnabled locationSharingRecipientIds sharedLocation locationTrail');
+      if (!user) return respond({ error: 'Không tìm thấy tài khoản.' });
+
+      const location = await updateSharedLocation(user, payload);
+      if (location) emitLocationToRecipients(user, emitSocialEvent, 'map:location-updated', location);
+      return respond({ ok: true });
+    } catch (error) {
+      console.warn(`Live location update failed: ${error.message}`);
+      return respond({ error: 'Không thể cập nhật vị trí lúc này.' });
+    }
+  });
+
+  socket.on('map:location-stop', async (_payload = {}, callback) => {
+    const respond = callbackOrNoop(callback);
+    try {
+      if (!socket.data.socialUserId) return respond({ ok: true });
+      const user = await User.findById(socket.data.socialUserId).select('friends locationSharingRecipientIds');
+      if (user) {
+        await setLocationSharing(user, false);
+        emitLocationToRecipients(user, emitSocialEvent, 'map:location-stopped', { userId: user._id.toString() });
+      }
+      return respond({ ok: true });
+    } catch (error) {
+      console.warn(`Stop live location failed: ${error.message}`);
+      return respond({ error: 'Không thể dừng chia sẻ vị trí lúc này.' });
     }
   });
 

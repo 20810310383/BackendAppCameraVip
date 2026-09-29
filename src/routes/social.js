@@ -204,9 +204,9 @@ export function createSocialRouter({
       await Promise.all([
         User.updateOne(
           { _id: user._id },
-          { $addToSet: { blockedUsers: targetUser._id }, $pull: { friends: targetUser._id } },
+          { $addToSet: { blockedUsers: targetUser._id }, $pull: { friends: targetUser._id, locationSharingRecipientIds: targetUser._id } },
         ),
-        User.updateOne({ _id: targetUser._id }, { $pull: { friends: user._id } }),
+        User.updateOne({ _id: targetUser._id }, { $pull: { friends: user._id, locationSharingRecipientIds: user._id } }),
         FriendRequest.deleteMany({
           $or: [
             { from: user._id, to: targetUser._id },
@@ -327,8 +327,8 @@ export function createSocialRouter({
       }
 
       await Promise.all([
-        User.updateOne({ _id: user._id }, { $pull: { friends: friend._id } }),
-        User.updateOne({ _id: friend._id }, { $pull: { friends: user._id } }),
+        User.updateOne({ _id: user._id }, { $pull: { friends: friend._id, locationSharingRecipientIds: friend._id } }),
+        User.updateOne({ _id: friend._id }, { $pull: { friends: user._id, locationSharingRecipientIds: user._id } }),
       ]);
       emitSocialEvent(user._id, 'social:friends-updated', { reason: 'friend_removed' });
       emitSocialEvent(friend._id, 'social:friend-removed', { userId: user._id.toString() });
@@ -355,9 +355,9 @@ export function createSocialRouter({
       await Promise.all([
         User.updateOne(
           { _id: user._id },
-          { $addToSet: { blockedUsers: friend._id }, $pull: { friends: friend._id } },
+          { $addToSet: { blockedUsers: friend._id }, $pull: { friends: friend._id, locationSharingRecipientIds: friend._id } },
         ),
-        User.updateOne({ _id: friend._id }, { $pull: { friends: user._id } }),
+        User.updateOne({ _id: friend._id }, { $pull: { friends: user._id, locationSharingRecipientIds: user._id } }),
         FriendRequest.deleteMany({
           $or: [
             { from: user._id, to: friend._id },

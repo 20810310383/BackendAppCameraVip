@@ -90,12 +90,21 @@ const momentPostSchema = new mongoose.Schema(
     // is only visible to the friend ids captured when it was published.
     shareMode: { type: String, enum: ['all', 'selected'], default: 'all', index: true },
     recipientIds: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
+    // New moments are only shown in a shared chain after a member (or the
+    // owner) explicitly selects them for that chain.
+    sharedChainIds: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'SharedChain' }], default: [], index: true },
+    // This preserves the old automatic feed for documents created before the
+    // selection feature was introduced, while still allowing them to be hidden
+    // from individual chains.
+    sharedChainExcludedIds: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'SharedChain' }], default: [] },
+    sharedChainSelectionStarted: { type: Boolean, default: true },
     views: { type: [postViewSchema], default: [] },
   },
   { timestamps: true },
 );
 
 momentPostSchema.index({ createdAt: -1, author: 1 });
+momentPostSchema.index({ sharedChainIds: 1, createdAt: -1 });
 
 export const MomentPost = mongoose.models.MomentPost
   || mongoose.model('MomentPost', momentPostSchema);

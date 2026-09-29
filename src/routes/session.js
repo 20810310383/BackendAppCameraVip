@@ -8,6 +8,7 @@ import {
   hashSessionToken,
   sessionPayload,
 } from '../services/session-service.js';
+import { emitLocationToRecipients, setLocationSharing } from '../services/location-sharing-service.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DUMMY_PASSWORD_HASH =
@@ -64,7 +65,7 @@ function invalidSession(response, message = 'Phiên đăng nhập không hợp l
   return response.status(401).json({ code: 'SESSION_INVALID', message });
 }
 
-export function createSessionRouter({ isDatabaseReady }) {
+export function createSessionRouter({ isDatabaseReady, emitSocialEvent = () => undefined }) {
   const router = Router();
 
   router.post('/login', async (request, response) => {
@@ -219,6 +220,16 @@ export function createSessionRouter({ isDatabaseReady }) {
     if (refreshToken) tokenConditions.push({ refreshTokenHash: hashSessionToken(refreshToken) });
 
     try {
+      const activeSession = tokenConditions.length > 0
+        ? await Session.findOne({ $or: tokenConditions }).select('userId')
+        : null;
+      if (activeSession) {
+        const user = await User.findById(activeSession.userId).select('friends locationSharingEnabled locationSharingRecipientIds');
+        if (user?.locationSharingEnabled) {
+          await setLocationSharing(user, false);
+          emitLocationToRecipients(user, emitSocialEvent, 'map:location-stopped', { userId: user._id.toString() });
+        }
+      }
       if (tokenConditions.length > 0) await Session.deleteMany({ $or: tokenConditions });
       return response.json({ message: 'Đăng xuất thành công.' });
     } catch (error) {
