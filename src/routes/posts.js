@@ -215,10 +215,18 @@ function sanitizeStickers(value) {
   if (!Array.isArray(value)) return [];
   return value.slice(0, 16).flatMap((sticker) => {
     if (!sticker || typeof sticker.emoji !== 'string' || !sticker.emoji.trim()) return [];
+    const positionMode = sticker.positionMode === 'relative' ? 'relative' : 'absolute';
     return [{
       emoji: sticker.emoji.trim().slice(0, 24),
-      x: Number.isFinite(Number(sticker.x)) ? Number(sticker.x) : 0,
-      y: Number.isFinite(Number(sticker.y)) ? Number(sticker.y) : 0,
+      // Relative coordinates are fractions of the original composition canvas.
+      // Keep a little headroom for intentionally cropped / oversized stickers.
+      x: Number.isFinite(Number(sticker.x))
+        ? (positionMode === 'relative' ? Math.max(-0.25, Math.min(1.25, Number(sticker.x))) : Number(sticker.x))
+        : 0,
+      y: Number.isFinite(Number(sticker.y))
+        ? (positionMode === 'relative' ? Math.max(-0.25, Math.min(1.25, Number(sticker.y))) : Number(sticker.y))
+        : 0,
+      positionMode,
       scale: Math.max(0.25, Math.min(4, Number(sticker.scale) || 1)),
       rotation: Math.max(-360, Math.min(360, Number(sticker.rotation) || 0)),
     }];
