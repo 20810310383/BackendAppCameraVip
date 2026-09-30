@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import cors from 'cors';
 import express from 'express';
 import mongoose from 'mongoose';
@@ -36,6 +38,8 @@ import { log, startupBanner } from './services/logger.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
 const corsOrigin = process.env.CORS_ORIGIN ?? '*';
+const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
+const stickerPacksDirectory = path.resolve(serverDirectory, '../assets/sticker-packs');
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: corsOrigin, methods: ['GET', 'POST'] } });
@@ -68,6 +72,9 @@ async function notifyFriendsOfPresence(userId, isOnline, lastActiveAt) {
 
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
+// These are optional, versioned app assets. Keeping them outside `uploads` means
+// they are deployed with the backend, but never bundled into the mobile app.
+app.use('/stickers', express.static(stickerPacksDirectory, { immutable: true, maxAge: '365d' }));
 app.use('/uploads', express.static(uploadsDirectory, { immutable: true, maxAge: '30d' }));
 app.use('/api/auth', createAuthRouter({ isDatabaseReady: () => mongoReady }));
 app.use('/api/auth', createSessionRouter({

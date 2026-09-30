@@ -16,7 +16,11 @@ const mediaSchema = new mongoose.Schema(
 
 const stickerSchema = new mongoose.Schema(
   {
-    emoji: { type: String, trim: true, maxlength: 24, required: true },
+    // Older posts only have `emoji`; image stickers are resolved from a shared
+    // client catalogue by `assetId`, never from a user-controlled file URL.
+    kind: { type: String, enum: ['emoji', 'asset'] },
+    emoji: { type: String, trim: true, maxlength: 24, default: '' },
+    assetId: { type: String, trim: true, maxlength: 80, default: '' },
     x: { type: Number, min: -4_000, max: 4_000 },
     y: { type: Number, min: -4_000, max: 4_000 },
     // Deliberately no default: documents created by an older server have no

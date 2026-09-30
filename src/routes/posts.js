@@ -214,10 +214,19 @@ function uploadedFile(request, fieldName) {
 function sanitizeStickers(value) {
   if (!Array.isArray(value)) return [];
   return value.slice(0, 16).flatMap((sticker) => {
-    if (!sticker || typeof sticker.emoji !== 'string' || !sticker.emoji.trim()) return [];
+    if (!sticker || typeof sticker !== 'object') return [];
+    const emoji = typeof sticker.emoji === 'string' ? sticker.emoji.trim().slice(0, 24) : '';
+    // Only accept stable catalogue IDs. This deliberately rules out arbitrary
+    // URLs so sticker metadata cannot become a way to persist remote content.
+    const assetId = typeof sticker.assetId === 'string' && /^[a-z0-9][a-z0-9_-]{0,79}$/i.test(sticker.assetId.trim())
+      ? sticker.assetId.trim()
+      : '';
+    if (!emoji && !assetId) return [];
     const positionMode = sticker.positionMode === 'relative' ? 'relative' : 'absolute';
     return [{
-      emoji: sticker.emoji.trim().slice(0, 24),
+      kind: assetId ? 'asset' : 'emoji',
+      ...(emoji ? { emoji } : {}),
+      ...(assetId ? { assetId } : {}),
       // Relative coordinates are fractions of the original composition canvas.
       // Keep a little headroom for intentionally cropped / oversized stickers.
       x: Number.isFinite(Number(sticker.x))
