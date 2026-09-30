@@ -32,6 +32,7 @@ import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/
 import { verifyEmailTransport } from './services/email-service.js';
 import { findAvailableUsername } from './services/username-service.js';
 import { hashSessionToken } from './services/session-service.js';
+import { log, startupBanner } from './services/logger.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
 const corsOrigin = process.env.CORS_ORIGIN ?? '*';
@@ -225,7 +226,7 @@ io.on('connection', (socket) => {
       await notifyFriendsOfPresence(session.userId, true, lastActiveAt);
       respond({ ok: true });
     } catch (error) {
-      console.warn(`Social realtime subscription failed: ${error.message}`);
+      log.failure('SOCKET', error);
       respond({ error: 'Không thể kết nối cập nhật thời gian thực.' });
     }
   });
@@ -240,7 +241,7 @@ io.on('connection', (socket) => {
         isTyping: Boolean(payload.isTyping),
       });
     } catch (error) {
-      console.warn(`Message typing update failed: ${error.message}`);
+      log.failure('SOCKET', error);
     }
   });
 
@@ -250,7 +251,7 @@ io.on('connection', (socket) => {
       if (!mongoReady || !socket.data.socialUserId) return respond({ error: 'Vui lòng kết nối tài khoản trước.' });
       return respond({ ok: true, locations: await getFriendLocationSnapshot(socket.data.socialUserId) });
     } catch (error) {
-      console.warn(`Live location snapshot failed: ${error.message}`);
+      log.failure('MAP', error);
       return respond({ error: 'Không thể tải vị trí bạn bè lúc này.' });
     }
   });
@@ -267,7 +268,7 @@ io.on('connection', (socket) => {
       if (location) emitLocationToRecipients(user, emitSocialEvent, 'map:location-updated', location);
       return respond({ ok: true });
     } catch (error) {
-      console.warn(`Live location update failed: ${error.message}`);
+      log.failure('MAP', error);
       return respond({ error: 'Không thể cập nhật vị trí lúc này.' });
     }
   });
@@ -283,7 +284,7 @@ io.on('connection', (socket) => {
       }
       return respond({ ok: true });
     } catch (error) {
-      console.warn(`Stop live location failed: ${error.message}`);
+      log.failure('MAP', error);
       return respond({ error: 'Không thể dừng chia sẻ vị trí lúc này.' });
     }
   });
@@ -476,7 +477,7 @@ io.on('connection', (socket) => {
         const lastActiveAt = new Date();
         void User.updateOne({ _id: socialUserId }, { $set: { lastActiveAt } })
           .then(() => notifyFriendsOfPresence(socialUserId, false, lastActiveAt))
-          .catch((error) => console.warn(`Could not update activity status: ${error.message}`));
+          .catch((error) => log.failure('SOCKET', error));
       }, 0);
     }
     if (mongoReady) {
@@ -499,6 +500,7 @@ let isShuttingDown = false;
 async function gracefulShutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
+  log.warn('SYSTEM', `Nhận ${signal} · đang đóng kết nối an toàn…`);
   try {
     io.close();
     if (typeof httpServer.closeAllConnections === 'function') {
@@ -508,9 +510,10 @@ async function gracefulShutdown(signal) {
     if (mongoose.connection.readyState !== 0) {
       await mongoose.disconnect();
     }
-  } catch (err) {
-    console.error('Error during shutdown:', err);
+  } catch (error) {
+    log.failure('SYSTEM', error);
   } finally {
+    log.info('SYSTEM', 'Đã tắt máy chủ · hẹn gặp lại ✦');
     process.exit(0);
   }
 }
@@ -523,8 +526,8 @@ async function start() {
     try {
       await mongoose.connect(process.env.MONGODB_URI);
       mongoReady = true;
-      console.log('MongoDB connected');
-      await backfillUsernames().catch((e) => console.warn('Backfill usernames warning:', e.message));
+      log.success('MONGO', 'Đã kết nối · sẵn sàng phục vụ khoảnh khắc, chat và bạn bè');
+      await backfillUsernames().catch((error) => log.failure('MONGO', error));
       await Promise.allSettled([
         User.createIndexes(),
         FriendRequest.createIndexes(),
@@ -532,13 +535,13 @@ async function start() {
         migrateSharedChainIndexes(),
       ]);
       void verifyEmailTransport()
-        .then((ready) => console.log(ready ? 'Email transport is ready' : 'Email transport is not configured'))
-        .catch((error) => console.warn(`Email transport unavailable: ${error.message}`));
+        .then((ready) => (ready ? log.success('EMAIL', 'Kênh gửi email đã sẵn sàng') : log.warn('EMAIL', 'Chưa cấu hình kênh gửi email')))
+        .catch((error) => log.failure('EMAIL', error));
     } catch (error) {
-      console.warn(`MongoDB unavailable, using in-memory games: ${error.message}`);
+      log.warn('MONGO', `Không thể kết nối · tạm dùng bộ nhớ cho ván cờ (${error.message})`);
     }
   } else {
-    console.warn('MONGODB_URI is not set, using in-memory games for local demo.');
+    log.warn('MONGO', 'Chưa có MONGODB_URI · dùng bộ nhớ tạm cho chế độ demo');
   }
 
   let attempts = 0;
@@ -550,23 +553,23 @@ async function start() {
   }
 
   httpServer.on('listening', () => {
-    console.log(`Boardverse API listening on http://0.0.0.0:${PORT}`);
-    void warmStockfish().then(() => console.log('Stockfish is ready')).catch((error) => console.warn(`Stockfish prewarm failed: ${error.message}`));
+    startupBanner({ port: PORT, databaseReady: mongoReady });
+    void warmStockfish().then(() => log.success('CHESS', 'Stockfish đã sẵn sàng')).catch((error) => log.failure('CHESS', error));
   });
 
   httpServer.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
       attempts += 1;
       if (attempts <= maxRetries) {
-        console.warn(`Port ${PORT} is in use, retrying in ${retryDelay}ms (${attempts}/${maxRetries})...`);
+        log.warn('HTTP', `Cổng ${PORT} đang bận · thử lại sau ${retryDelay}ms (${attempts}/${maxRetries})`);
         setTimeout(() => {
           tryListen();
         }, retryDelay);
         return;
       }
-      console.error(`Port ${PORT} is still in use after ${maxRetries} retries.`);
+      log.error('HTTP', `Cổng ${PORT} vẫn bận sau ${maxRetries} lần thử`);
     } else {
-      console.error('HTTP server error:', error);
+      log.failure('HTTP', error);
     }
   });
 
