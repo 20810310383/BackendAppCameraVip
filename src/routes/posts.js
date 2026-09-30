@@ -313,7 +313,13 @@ async function persistMedia(file, userId, durationMs) {
     const destination = path.join(momentImageDirectory, filename);
     const image = sharp(file.buffer, { failOn: 'none', limitInputPixels: 36_000_000 }).rotate();
     const metadata = await image.metadata();
-    await image.resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true }).webp({ quality: 90, effort: 4 }).toFile(destination);
+    // Keep one optimized file only: 3200px/quality 94 remains materially
+    // smaller than the original, while preserving enough detail for a user
+    // to save and view the photo fullscreen on a modern phone.
+    await image
+      .resize({ width: 3200, height: 3200, fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 94, effort: 5 })
+      .toFile(destination);
     return {
       type: 'image',
       path: `/uploads/moments/images/${filename}`,
