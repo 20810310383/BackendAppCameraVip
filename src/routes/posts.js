@@ -12,6 +12,7 @@ import { MomentPost } from '../models/MomentPost.js';
 import { SharedChain } from '../models/SharedChain.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
+import { deleteStoredObject, deleteStoredObjects, storeProcessedFile } from '../services/object-storage-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,7 @@ const momentAudioDirectory = path.join(momentUploadDirectory, 'audio');
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
-const MAX_DAILY_VIDEOS = 10;
+const MAX_DAILY_VIDEOS = 5;
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/heic', 'image/heif']);
 const AUDIO_MIME_TYPES = new Set(['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/x-m4a', 'audio/flac', 'audio/ogg', 'audio/webm']);
 
@@ -320,9 +321,15 @@ async function persistMedia(file, userId, durationMs) {
       .resize({ width: 3200, height: 3200, fit: 'inside', withoutEnlargement: true })
       .webp({ quality: 94, effort: 5 })
       .toFile(destination);
+    const localUrl = `/uploads/moments/images/${filename}`;
     return {
       type: 'image',
-      path: `/uploads/moments/images/${filename}`,
+      path: await storeProcessedFile({
+        localPath: destination,
+        localUrl,
+        objectKey: `media/moments/images/${filename}`,
+        contentType: 'image/webp',
+      }),
       mimeType: 'image/webp',
       filename,
       width: metadata.width || undefined,
@@ -393,10 +400,11 @@ async function persistMedia(file, userId, durationMs) {
     }
   }
   let thumbnailPath = '';
+  let thumbnailFilePath = '';
   try {
     await mkdir(momentThumbnailDirectory, { recursive: true });
     const thumbnailFilename = `moment-thumb-${userId}-${randomId}.jpg`;
-    const thumbnailFilePath = path.join(momentThumbnailDirectory, thumbnailFilename);
+    thumbnailFilePath = path.join(momentThumbnailDirectory, thumbnailFilename);
     await runFfmpeg([
       '-y',
       '-ss', '0',
@@ -413,9 +421,33 @@ async function persistMedia(file, userId, durationMs) {
     console.warn(`Moment video thumbnail skipped: ${error.message}`);
   }
 
+  const localVideoUrl = `/uploads/moments/videos/${filename}`;
+  let storedVideoPath = '';
+  try {
+    storedVideoPath = await storeProcessedFile({
+      localPath: path.join(momentVideoDirectory, filename),
+      localUrl: localVideoUrl,
+      objectKey: `media/moments/videos/${filename}`,
+      contentType: mimeType,
+    });
+    if (thumbnailPath && thumbnailFilePath) {
+      const thumbnailFilename = path.basename(thumbnailPath);
+      thumbnailPath = await storeProcessedFile({
+        localPath: thumbnailFilePath,
+        localUrl: thumbnailPath,
+        objectKey: `media/moments/thumbnails/${thumbnailFilename}`,
+        contentType: 'image/jpeg',
+      });
+    }
+  } catch (error) {
+    if (storedVideoPath) await deleteStoredObject(storedVideoPath);
+    await unlink(thumbnailFilePath).catch(() => undefined);
+    throw error;
+  }
+
   return {
     type: 'video',
-    path: `/uploads/moments/videos/${filename}`,
+    path: storedVideoPath,
     mimeType,
     filename,
     thumbnailPath,
@@ -451,38 +483,66 @@ async function persistMomentAudio(file, userId) {
     ]);
     if ((await stat(compressedPath)).size > 0) {
       await unlink(sourcePath).catch(() => undefined);
-      return `/uploads/moments/audio/${compressedFilename}`;
+      return storeProcessedFile({
+        localPath: compressedPath,
+        localUrl: `/uploads/moments/audio/${compressedFilename}`,
+        objectKey: `media/moments/audio/${compressedFilename}`,
+        contentType: 'audio/mp4',
+      });
     }
   } catch (error) {
     console.warn(`Moment audio compression skipped: ${error.message}`);
   }
 
   await unlink(compressedPath).catch(() => undefined);
-  return `/uploads/moments/audio/${sourceFilename}`;
+  return storeProcessedFile({
+    localPath: sourcePath,
+    localUrl: `/uploads/moments/audio/${sourceFilename}`,
+    objectKey: `media/moments/audio/${sourceFilename}`,
+    contentType: file.mimetype || 'audio/mp4',
+  });
+}
+
+async function removeMomentPaths(paths) {
+  const uniquePaths = [...new Set(paths.filter((pathname) => typeof pathname === 'string' && pathname))];
+  const removedR2Paths = await deleteStoredObjects(uniquePaths);
+  await Promise.all(uniquePaths.map(async (pathname) => {
+    if (removedR2Paths.has(pathname)) return;
+    if (!pathname.startsWith('/uploads/moments/')) return;
+    const folder = pathname.includes('/thumbnails/')
+      ? momentThumbnailDirectory
+      : pathname.includes('/videos/') ? momentVideoDirectory
+        : pathname.includes('/audio/') ? momentAudioDirectory : momentImageDirectory;
+    await unlink(path.join(folder, path.basename(pathname))).catch(() => undefined);
+  }));
 }
 
 async function removeLocalMoment(mediaOrPath) {
   const paths = typeof mediaOrPath === 'string'
     ? [mediaOrPath]
     : [mediaOrPath?.path, mediaOrPath?.thumbnailPath];
-  await Promise.all(paths.map(async (pathname) => {
-    if (!pathname?.startsWith('/uploads/moments/')) return;
-    const folder = pathname.includes('/thumbnails/')
-      ? momentThumbnailDirectory
-      : pathname.includes('/videos/') ? momentVideoDirectory : momentImageDirectory;
-    await unlink(path.join(folder, path.basename(pathname))).catch(() => undefined);
-  }));
+  await removeMomentPaths(paths);
 }
 
 async function removeLocalMomentAudio(audioPath) {
-  if (!audioPath?.startsWith('/uploads/moments/audio/')) return;
-  await unlink(path.join(momentAudioDirectory, path.basename(audioPath))).catch(() => undefined);
+  await removeMomentPaths([audioPath]);
+}
+
+async function removeMomentAssets(post) {
+  await removeMomentPaths([
+    post?.media?.path,
+    post?.media?.thumbnailPath,
+    post?.widget?.music?.previewUrl,
+  ]);
 }
 
 async function ensureVideoThumbnail(post) {
   const media = post?.media;
   if (media?.type !== 'video') return '';
   if (media.thumbnailPath) return media.thumbnailPath;
+  // New R2 videos always receive a thumbnail before their temporary source
+  // file is deleted. Old local posts keep the legacy repair behavior below.
+  if (/^https?:\/\//i.test(media.path || '')) return '';
   const videoFilename = path.basename(media.path || '');
   if (!videoFilename) return '';
   const thumbnailFilename = `moment-thumb-${path.basename(videoFilename, path.extname(videoFilename))}.jpg`;
@@ -673,7 +733,7 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         if (todayVideoCount >= MAX_DAILY_VIDEOS) {
           return response.status(429).json({
             code: 'MOMENT_VIDEO_DAILY_LIMIT',
-            message: 'Mỗi tài khoản chỉ được đăng tối đa 10 video mỗi ngày.',
+            message: `Mỗi tài khoản chỉ được đăng tối đa ${MAX_DAILY_VIDEOS} video mỗi ngày.`,
           });
         }
       }
@@ -724,9 +784,19 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       if (post.author.toString() !== user._id.toString()) {
         return response.status(403).json({ code: 'MOMENT_DELETE_FORBIDDEN', message: 'Bạn chỉ có thể xóa khoảnh khắc do chính mình đăng.' });
       }
+      // Remove the R2 files before deleting the document. If R2 is temporarily
+      // unavailable, keeping the post lets the user retry instead of creating
+      // an orphaned image/video (and its video thumbnail) in paid storage.
+      try {
+        await removeMomentAssets(post);
+      } catch (mediaError) {
+        console.error(`Delete moment media failed (${post._id.toString()}):`, mediaError);
+        return response.status(503).json({
+          code: 'DELETE_MOMENT_MEDIA_FAILED',
+          message: 'Chưa thể xoá tệp media trên kho lưu trữ. Vui lòng thử lại.',
+        });
+      }
       await MomentPost.deleteOne({ _id: post._id });
-      await removeLocalMoment(post.media);
-      await removeLocalMomentAudio(post.widget?.music?.previewUrl);
       const recipients = new Set([
         user._id.toString(),
         ...(post.shareMode === 'selected'

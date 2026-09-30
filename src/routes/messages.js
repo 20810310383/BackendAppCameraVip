@@ -12,6 +12,7 @@ import { MomentPost } from '../models/MomentPost.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { canUsersMessage, conversationKeyFor, messageAccessStatus } from '../services/message-service.js';
+import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
 import { isExpoPushToken, sendChatPushNotification } from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
@@ -198,11 +199,13 @@ async function populateMessage(message) {
 }
 
 async function removeLocalAttachment(attachmentPath) {
+  if (await deleteStoredObject(attachmentPath)) return;
   if (!attachmentPath?.startsWith('/uploads/messages/')) return;
   await unlink(path.join(messageUploadDirectory, path.basename(path.dirname(attachmentPath)), path.basename(attachmentPath))).catch(() => undefined);
 }
 
 async function removeLocalConversationWallpaper(wallpaperPath) {
+  if (await deleteStoredObject(wallpaperPath)) return;
   if (!wallpaperPath?.startsWith('/uploads/conversation-wallpapers/')) return;
   await unlink(path.join(conversationWallpaperDirectory, path.basename(wallpaperPath))).catch(() => undefined);
 }
@@ -216,7 +219,12 @@ async function persistImage(file, userId) {
   const metadata = await image.metadata();
   await image.resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true }).webp({ quality: 95, effort: 4 }).toFile(destination);
   return {
-    path: `/uploads/messages/images/${filename}`,
+    path: await storeProcessedFile({
+      localPath: destination,
+      localUrl: `/uploads/messages/images/${filename}`,
+      objectKey: `media/messages/images/${filename}`,
+      contentType: 'image/webp',
+    }),
     mimeType: 'image/webp',
     filename,
     width: metadata.width || undefined,
@@ -236,7 +244,12 @@ async function persistConversationWallpaper(file, userId) {
     .webp({ quality: 88, effort: 4 })
     .toFile(destination);
   return {
-    path: `/uploads/conversation-wallpapers/${filename}`,
+    path: await storeProcessedFile({
+      localPath: destination,
+      localUrl: `/uploads/conversation-wallpapers/${filename}`,
+      objectKey: `media/conversation-wallpapers/${filename}`,
+      contentType: 'image/webp',
+    }),
     mimeType: 'image/webp',
     filename,
     width: metadata.width || undefined,
@@ -260,9 +273,15 @@ async function persistAudio(file, userId, durationMs) {
   if (file.size > MAX_AUDIO_BYTES) throw new Error('Tin nhắn thoại tối đa 20 MB.');
   await mkdir(messageAudioDirectory, { recursive: true });
   const filename = `voice-${userId}-${randomBytes(12).toString('hex')}${audioExtension(file.mimetype, file.originalname)}`;
-  await writeFile(path.join(messageAudioDirectory, filename), file.buffer);
+  const localPath = path.join(messageAudioDirectory, filename);
+  await writeFile(localPath, file.buffer);
   return {
-    path: `/uploads/messages/audio/${filename}`,
+    path: await storeProcessedFile({
+      localPath,
+      localUrl: `/uploads/messages/audio/${filename}`,
+      objectKey: `media/messages/audio/${filename}`,
+      contentType: file.mimetype || 'audio/m4a',
+    }),
     mimeType: file.mimetype || 'audio/m4a',
     filename,
     durationMs: Number.isFinite(durationMs) && durationMs > 0 ? Math.round(durationMs) : undefined,

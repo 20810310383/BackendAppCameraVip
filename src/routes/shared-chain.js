@@ -11,6 +11,7 @@ import { FriendRequest } from '../models/FriendRequest.js';
 import { Session } from '../models/Session.js';
 import { SharedChain } from '../models/SharedChain.js';
 import { User } from '../models/User.js';
+import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const MAX_GROUPS_PER_OWNER = 12;
@@ -215,10 +216,16 @@ async function optimizeGroupAvatar(file, ownerId) {
     .webp({ quality: 88, effort: 5, smartSubsample: true })
     .toBuffer();
   await writeFile(destination, optimized);
-  return `/uploads/shared-chains/${filename}`;
+  return storeProcessedFile({
+    localPath: destination,
+    localUrl: `/uploads/shared-chains/${filename}`,
+    objectKey: `media/shared-chains/${filename}`,
+    contentType: 'image/webp',
+  });
 }
 
 async function removeLocalGroupAvatar(avatarPath) {
+  if (await deleteStoredObject(avatarPath)) return;
   if (!avatarPath?.startsWith('/uploads/shared-chains/')) return;
   await unlink(path.join(groupAvatarDirectory, path.basename(avatarPath))).catch(() => undefined);
 }

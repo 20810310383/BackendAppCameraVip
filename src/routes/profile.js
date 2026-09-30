@@ -10,6 +10,7 @@ import { FriendRequest } from '../models/FriendRequest.js';
 import { MomentPost } from '../models/MomentPost.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
+import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -107,8 +108,21 @@ async function optimizeProfileImage(file, type, userId) {
   const filename = `${type}-${userId}-${randomBytes(12).toString('hex')}.webp`;
   const destination = path.join(profileUploadDirectory, filename);
   const resizeOptions = type === 'avatar'
-    ? { width: 1024, height: 1024, fit: 'cover', position: 'attention', withoutEnlargement: true }
-    : { width: 1600, height: 900, fit: 'cover', position: 'attention', withoutEnlargement: true };
+    ? {
+      width: 1024,
+      height: 1024,
+      // Avatars keep their source ratio and are cropped only by the circular UI.
+      fit: 'inside',
+      withoutEnlargement: true,
+    }
+    : {
+      // Preserve the 16:9 area chosen in the Android picker and normalize older uploads.
+      width: 1600,
+      height: 900,
+      fit: 'cover',
+      position: 'centre',
+      withoutEnlargement: true,
+    };
 
   const optimized = await sharp(file.buffer, { failOn: 'none', limitInputPixels: 24_000_000 })
     .rotate()
@@ -117,10 +131,16 @@ async function optimizeProfileImage(file, type, userId) {
     .toBuffer();
 
   await writeFile(destination, optimized);
-  return `/uploads/profiles/${filename}`;
+  return storeProcessedFile({
+    localPath: destination,
+    localUrl: `/uploads/profiles/${filename}`,
+    objectKey: `media/profiles/${filename}`,
+    contentType: 'image/webp',
+  });
 }
 
 async function removeLocalProfileImage(imagePath) {
+  if (await deleteStoredObject(imagePath)) return;
   if (!imagePath?.startsWith('/uploads/profiles/')) return;
   const filename = path.basename(imagePath);
   await unlink(path.join(profileUploadDirectory, filename)).catch(() => undefined);
