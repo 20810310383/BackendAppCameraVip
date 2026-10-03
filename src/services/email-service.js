@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 
-const APP_NAME = 'Camera Go';
+const APP_NAME = 'Camera Daily';
 let transporter;
 
 function escapeHtml(value) {
@@ -58,7 +58,7 @@ export async function sendPasswordResetOtp({ to, fullName, otp }) {
           </div>
           <div style="padding:26px 28px 30px">
             <p style="margin:0;color:#c5cbce;font-size:15px;line-height:23px">Xin chào <strong style="color:#ffffff">${safeName}</strong>,</p>
-            <p style="margin:12px 0 0;color:#aeb6b9;font-size:14px;line-height:22px">Nhập mã xác minh dưới đây trong ứng dụng Camera Go:</p>
+            <p style="margin:12px 0 0;color:#aeb6b9;font-size:14px;line-height:22px">Nhập mã xác minh dưới đây trong ứng dụng Camera Daily:</p>
             <div style="margin:24px 0;padding:18px;text-align:center;border:1px solid #715a25;border-radius:16px;background:#1b1a14;font-size:34px;font-weight:800;letter-spacing:12px;color:#f1ca70">${safeOtp}</div>
             <p style="margin:0;color:#aeb6b9;font-size:13px;line-height:21px">Mã có hiệu lực trong <strong style="color:#f1ca70">5 phút</strong>. Vì lý do bảo mật, vui lòng không chia sẻ mã này với bất kỳ ai.</p>
             <p style="margin:18px 0 0;color:#778185;font-size:12px;line-height:19px">Nếu bạn không yêu cầu đặt lại mật khẩu, hãy bỏ qua email này. Mật khẩu hiện tại của bạn vẫn an toàn.</p>

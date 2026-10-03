@@ -14,7 +14,7 @@ export function isExpoPushToken(value) {
   return typeof value === 'string' && EXPO_PUSH_TOKEN.test(value);
 }
 
-export async function sendChatPushNotification({ recipientId, sender, message }) {
+async function sendPushNotification({ recipientId, title, body, data, logLabel }) {
   try {
     const recipient = await User.findById(recipientId).select('+expoPushTokens');
     const tokens = (recipient?.expoPushTokens || [])
@@ -24,18 +24,14 @@ export async function sendChatPushNotification({ recipientId, sender, message })
 
     const payload = tokens.map(({ token, platform }) => ({
       to: token,
-      title: sender.fullName,
-      body: previewFor(message),
+      title,
+      body,
       // Android can use the packaged MP3. iOS uses its system sound because MP3 is not
       // a reliable APNs custom-sound format; use a WAV asset when a shared custom iOS sound is needed.
       sound: platform === 'android' ? 'amthanhtinnhan.mp3' : 'default',
       channelId: 'messages',
       priority: 'high',
-      data: {
-        type: 'chat_message',
-        friendId: sender.id || sender._id?.toString(),
-        url: `/chat?friendId=${encodeURIComponent(sender.id || sender._id?.toString() || '')}`,
-      },
+      data,
     }));
     const response = await fetch(EXPO_PUSH_URL, {
       method: 'POST',
@@ -55,7 +51,56 @@ export async function sendChatPushNotification({ recipientId, sender, message })
       await User.updateOne({ _id: recipientId }, { $pull: { expoPushTokens: { token: { $in: invalidTokens } } } });
     }
   } catch (error) {
-    // Push delivery is best-effort and must never block a persisted realtime message.
-    console.warn(`Could not send chat push notification: ${error.message}`);
+    // Push delivery is best-effort and must never block a persisted app action.
+    console.warn(`Could not send ${logLabel} push notification: ${error.message}`);
   }
+}
+
+export function sendChatPushNotification({ recipientId, sender, message }) {
+  const friendId = sender.id || sender._id?.toString() || '';
+  return sendPushNotification({
+    recipientId,
+    title: sender.fullName,
+    body: previewFor(message),
+    logLabel: 'chat',
+    data: {
+      type: 'chat_message',
+      friendId,
+      url: `/chat?friendId=${encodeURIComponent(friendId)}`,
+    },
+  });
+}
+
+export function sendFriendRequestPushNotification({ recipientId, sender, requestId }) {
+  const routeKey = requestId || `friend-${Date.now()}`;
+  return sendPushNotification({
+    recipientId,
+    title: 'Lời mời kết bạn',
+    body: `${sender.fullName || sender.username || 'Một người dùng'} đã gửi lời mời kết bạn cho bạn.`,
+    logLabel: 'friend request',
+    data: {
+      type: 'friend_request',
+      requestId,
+      url: `/friends-posts?openNotifications=${encodeURIComponent(routeKey)}`,
+    },
+  });
+}
+
+export function sendSharedChainInvitationPushNotification({ recipientId, sender, chainId, chainTitle }) {
+  const routeKey = chainId || `shared-chain-${Date.now()}`;
+  const groupName = typeof chainTitle === 'string' && chainTitle.trim() ? ` “${chainTitle.trim()}”` : '';
+  const senderName = sender?.fullName || sender?.username;
+  return sendPushNotification({
+    recipientId,
+    title: 'Lời mời vào nhóm',
+    body: senderName
+      ? `${senderName} đã mời bạn tham gia nhóm${groupName}.`
+      : `Bạn có một lời mời tham gia nhóm${groupName}.`,
+    logLabel: 'shared chain invitation',
+    data: {
+      type: 'shared_chain_invitation',
+      chainId,
+      url: `/friends-posts?openNotifications=${encodeURIComponent(routeKey)}`,
+    },
+  });
 }

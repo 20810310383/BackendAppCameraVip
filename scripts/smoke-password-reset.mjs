@@ -29,7 +29,7 @@ async function post(baseUrl, path, body) {
 try {
   await mongoose.connect(process.env.MONGODB_URI);
   const user = await User.create({
-    fullName: 'Camera Go Reset Test',
+    fullName: 'Camera Daily Reset Test',
     email,
     passwordHash: await bcrypt.hash('OldPass123', 10),
   });

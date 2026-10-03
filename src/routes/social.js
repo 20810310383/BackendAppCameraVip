@@ -3,6 +3,7 @@ import { FriendRequest } from '../models/FriendRequest.js';
 import { SharedChain } from '../models/SharedChain.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
+import { sendFriendRequestPushNotification, sendSharedChainInvitationPushNotification } from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 import { normalizeUsername, usernameIsValid } from '../services/username-service.js';
 
@@ -167,6 +168,11 @@ export function createSocialRouter({
       emitSharedChainUpdate(chain);
       for (const invitedUserId of invitedUserIds) {
         emitSocialEvent(invitedUserId, 'shared-chain:invitation', { chainId: chain._id.toString() });
+        void sendSharedChainInvitationPushNotification({
+          recipientId: invitedUserId,
+          chainId: chain._id.toString(),
+          chainTitle: chain.title,
+        });
       }
     }
   };
@@ -450,6 +456,7 @@ export function createSocialRouter({
         requestId: friendRequest.id,
         from: userSummary(user, isUserOnline),
       });
+      void sendFriendRequestPushNotification({ recipientId: friend._id, sender: user, requestId: friendRequest.id });
       return response.status(201).json({
         message: `Đã gửi lời mời tới @${friend.username}.`,
         ...(await friendList(user._id, isUserOnline)),

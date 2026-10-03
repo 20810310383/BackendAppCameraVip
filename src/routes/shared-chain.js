@@ -12,6 +12,7 @@ import { Session } from '../models/Session.js';
 import { SharedChain } from '../models/SharedChain.js';
 import { User } from '../models/User.js';
 import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
+import { sendFriendRequestPushNotification, sendSharedChainInvitationPushNotification } from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const MAX_GROUPS_PER_OWNER = 12;
@@ -664,7 +665,15 @@ export function createSharedChainRouter({ isDatabaseReady, isUserOnline = () => 
       if (needsOwnerApproval) {
         emitSharedChainEvent(chain.owner, 'shared-chain:invitation-review-request', { chainId: chain._id.toString() });
       } else {
-        for (const invitedId of addedIds) emitSharedChainEvent(invitedId, 'shared-chain:invitation', { chainId: chain._id.toString() });
+        for (const invitedId of addedIds) {
+          emitSharedChainEvent(invitedId, 'shared-chain:invitation', { chainId: chain._id.toString() });
+          void sendSharedChainInvitationPushNotification({
+            recipientId: invitedId,
+            sender: user,
+            chainId: chain._id.toString(),
+            chainTitle: chain.title,
+          });
+        }
       }
       emitToMembers(chain, 'shared-chain:updated');
       return response.status(201).json({ chain: chainPayload(chain, user, isUserOnline), invitedIds: addedIds, awaitingOwnerApproval: needsOwnerApproval });
@@ -739,9 +748,16 @@ export function createSharedChainRouter({ isDatabaseReady, isUserOnline = () => 
           requestId: createdFriendRequest.id,
           from: userPayload(user, isUserOnline),
         });
+        void sendFriendRequestPushNotification({ recipientId: friendshipTarget._id, sender: user, requestId: createdFriendRequest.id });
       }
       if (action === 'approve' && !invitation.awaitingFriendship) {
         emitSharedChainEvent(request.params.memberId, 'shared-chain:invitation', { chainId: chain._id.toString() });
+        void sendSharedChainInvitationPushNotification({
+          recipientId: request.params.memberId,
+          sender: user,
+          chainId: chain._id.toString(),
+          chainTitle: chain.title,
+        });
       }
       return response.json({ ok: true, action, chain: chainPayload(chain, user, isUserOnline) });
     } catch (error) {

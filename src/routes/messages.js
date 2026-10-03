@@ -269,10 +269,19 @@ function audioExtension(mimeType, originalName = '') {
   return '.m4a';
 }
 
+function normalizedAudioMimeType(value) {
+  const mimeType = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  // M4A is an MP4 audio container. `audio/mp4` is the interoperable MIME type
+  // understood by iOS AVFoundation, Android Media3 and Cloudflare R2 clients.
+  if (mimeType === 'audio/m4a' || mimeType === 'audio/x-m4a' || mimeType === 'audio/mp4a-latm') return 'audio/mp4';
+  return mimeType || 'audio/mp4';
+}
+
 async function persistAudio(file, userId, durationMs) {
   if (file.size > MAX_AUDIO_BYTES) throw new Error('Tin nhắn thoại tối đa 20 MB.');
+  const mimeType = normalizedAudioMimeType(file.mimetype);
   await mkdir(messageAudioDirectory, { recursive: true });
-  const filename = `voice-${userId}-${randomBytes(12).toString('hex')}${audioExtension(file.mimetype, file.originalname)}`;
+  const filename = `voice-${userId}-${randomBytes(12).toString('hex')}${audioExtension(mimeType, file.originalname)}`;
   const localPath = path.join(messageAudioDirectory, filename);
   await writeFile(localPath, file.buffer);
   return {
@@ -280,9 +289,9 @@ async function persistAudio(file, userId, durationMs) {
       localPath,
       localUrl: `/uploads/messages/audio/${filename}`,
       objectKey: `media/messages/audio/${filename}`,
-      contentType: file.mimetype || 'audio/m4a',
+      contentType: mimeType,
     }),
-    mimeType: file.mimetype || 'audio/m4a',
+    mimeType,
     filename,
     durationMs: Number.isFinite(durationMs) && durationMs > 0 ? Math.round(durationMs) : undefined,
   };
