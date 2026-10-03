@@ -6,6 +6,7 @@ const sharedLocationSchema = new mongoose.Schema(
     longitude: { type: Number, required: true, min: -180, max: 180 },
     heading: { type: Number, default: null },
     accuracy: { type: Number, default: null },
+    speedKmh: { type: Number, default: null },
     updatedAt: { type: Date, required: true },
   },
   { _id: false },

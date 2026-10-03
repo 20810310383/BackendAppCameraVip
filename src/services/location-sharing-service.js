@@ -1,6 +1,5 @@
 import { User } from '../models/User.js';
 
-export const LOCATION_STALE_MS = 15 * 60 * 1000;
 const MAX_LOCATION_TRAIL_POINTS = 60;
 const MAX_LOCATION_RECIPIENTS = 100;
 
@@ -47,6 +46,7 @@ export function validateSharedLocation(value) {
     longitude,
     heading: optionalBoundedNumber(value.heading, 0, 359.999),
     accuracy: optionalBoundedNumber(value.accuracy, 0, 10_000),
+    speedKmh: optionalBoundedNumber(value.speedKmh, 0, 500),
     updatedAt: new Date(),
   };
 }
@@ -66,6 +66,7 @@ export function toLiveLocationPayload(user) {
     longitude: user.sharedLocation.longitude,
     heading: user.sharedLocation.heading ?? null,
     accuracy: user.sharedLocation.accuracy ?? null,
+    speedKmh: user.sharedLocation.speedKmh ?? null,
     updatedAt: user.sharedLocation.updatedAt.toISOString(),
     trail: (user.locationTrail || []).map(coordinateFrom),
   };
@@ -130,12 +131,12 @@ export async function getFriendLocationSnapshot(viewerId) {
   const viewer = await User.findById(viewerId).select('friends');
   if (!viewer?.friends?.length) return [];
 
-  const staleAfter = new Date(Date.now() - LOCATION_STALE_MS);
+  // A user-controlled share stays visible until its owner turns it off. The client
+  // shows the exact update age, while the background task keeps moving users fresh.
   const friends = await User.find({
     _id: { $in: viewer.friends },
     locationSharingEnabled: true,
     locationSharingRecipientIds: viewer._id,
-    'sharedLocation.updatedAt': { $gte: staleAfter },
   }).select('fullName username avatarPath sharedLocation locationTrail');
   return friends.map(toLiveLocationPayload).filter(Boolean);
 }
