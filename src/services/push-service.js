@@ -34,6 +34,7 @@ export async function sendChatPushNotification({ recipientId, sender, message })
       data: {
         type: 'chat_message',
         friendId: sender.id || sender._id?.toString(),
+        url: `/chat?friendId=${encodeURIComponent(sender.id || sender._id?.toString() || '')}`,
       },
     }));
     const response = await fetch(EXPO_PUSH_URL, {
