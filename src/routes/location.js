@@ -3,6 +3,7 @@ import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import {
   emitLocationToRecipients,
+  getFriendLocationSnapshot,
   locationSharingRecipientIds,
   setLocationSharing,
   setLocationSharingRecipients,
@@ -59,6 +60,20 @@ export function createLocationRouter({ isDatabaseReady, emitSocialEvent = () => 
     } catch (error) {
       console.error('Get map sharing status failed:', error);
       return response.status(500).json({ code: 'GET_LOCATION_SHARING_FAILED', message: 'Không thể tải trạng thái chia sẻ vị trí.' });
+    }
+  });
+
+  // This snapshot endpoint backs up the socket feed. It keeps the map current
+  // after a reconnect or when the websocket is temporarily unavailable.
+  router.get('/map/friends', async (request, response) => {
+    if (!isDatabaseReady()) return unavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      return response.json({ locations: await getFriendLocationSnapshot(user._id) });
+    } catch (error) {
+      console.error('Get live friend locations failed:', error);
+      return response.status(500).json({ code: 'GET_FRIEND_LOCATIONS_FAILED', message: 'Không thể tải vị trí bạn bè.' });
     }
   });
 

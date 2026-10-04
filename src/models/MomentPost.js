@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 const mediaSchema = new mongoose.Schema(
   {
     type: { type: String, enum: ['image', 'video'], required: true },
+    // Allows daily video quotas to stay separate for recordings and library uploads.
+    origin: { type: String, enum: ['camera', 'library'] },
     path: { type: String, trim: true, required: true },
     mimeType: { type: String, trim: true, required: true },
     filename: { type: String, trim: true, required: true },

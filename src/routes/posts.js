@@ -21,10 +21,15 @@ const momentImageDirectory = path.join(momentUploadDirectory, 'images');
 const momentVideoDirectory = path.join(momentUploadDirectory, 'videos');
 const momentThumbnailDirectory = path.join(momentUploadDirectory, 'thumbnails');
 const momentAudioDirectory = path.join(momentUploadDirectory, 'audio');
-const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
-const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+// The original is uploaded before the server trims it to the selected 5 seconds.
+// 100 MB accommodates short 4K/HDR clips while keeping the in-memory upload bounded.
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
-const MAX_DAILY_VIDEOS = 5;
+const MAX_DAILY_CAMERA_VIDEOS = 5;
+const MAX_DAILY_LIBRARY_VIDEOS = 5;
+const MAX_VIDEO_DURATION_MS = 5_000;
+const FFMPEG_TIMEOUT_MS = 180_000;
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/heic', 'image/heif']);
 const AUDIO_MIME_TYPES = new Set(['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/x-m4a', 'audio/flac', 'audio/ogg', 'audio/webm']);
 
@@ -160,6 +165,10 @@ function clamp(value, min, max, fallback = 0) {
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
 }
 
+function videoOrigin(value) {
+  return value === 'library' ? 'library' : 'camera';
+}
+
 function authorLocalClock(value) {
   return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : '';
 }
@@ -289,7 +298,7 @@ function runFfmpeg(args) {
     const timer = setTimeout(() => {
       command.kill('SIGKILL');
       reject(new Error('Nén video quá thời gian cho phép.'));
-    }, 120_000);
+    }, FFMPEG_TIMEOUT_MS);
     command.stderr.on('data', (chunk) => {
       errorOutput += chunk.toString();
     });
@@ -305,22 +314,75 @@ function runFfmpeg(args) {
   });
 }
 
-async function persistMedia(file, userId, durationMs) {
+async function persistMedia(file, userId, durationMs, clipStartMs) {
   const isImage = IMAGE_MIME_TYPES.has(file.mimetype) || file.mimetype?.startsWith('image/');
   if (isImage) {
-    if (file.size > MAX_IMAGE_BYTES) throw new Error('Ảnh tối đa 12 MB.');
+    if (file.size > MAX_IMAGE_BYTES) {
+      const error = new Error('Ảnh đăng tối đa 2 MB.');
+      error.code = 'MOMENT_IMAGE_TOO_LARGE';
+      throw error;
+    }
     await mkdir(momentImageDirectory, { recursive: true });
+    // The app has already resized JPEGs adaptively under 2 MB. Keeping that
+    // single high-quality encode avoids a second lossy pass that softened photos.
+    if (file.mimetype === 'image/jpeg') {
+      const filename = `moment-${userId}-${randomBytes(12).toString('hex')}.jpg`;
+      const destination = path.join(momentImageDirectory, filename);
+      const metadata = await sharp(file.buffer, { failOn: 'none', limitInputPixels: 36_000_000 }).metadata();
+      await writeFile(destination, file.buffer);
+      const localUrl = `/uploads/moments/images/${filename}`;
+      return {
+        type: 'image',
+        path: await storeProcessedFile({
+          localPath: destination,
+          localUrl,
+          objectKey: `media/moments/images/${filename}`,
+          contentType: 'image/jpeg',
+        }),
+        mimeType: 'image/jpeg',
+        filename,
+        width: metadata.width || undefined,
+        height: metadata.height || undefined,
+      };
+    }
     const filename = `moment-${userId}-${randomBytes(12).toString('hex')}.webp`;
     const destination = path.join(momentImageDirectory, filename);
     const image = sharp(file.buffer, { failOn: 'none', limitInputPixels: 36_000_000 }).rotate();
-    const metadata = await image.metadata();
-    // Keep one optimized file only: 3200px/quality 94 remains materially
-    // smaller than the original, while preserving enough detail for a user
-    // to save and view the photo fullscreen on a modern phone.
-    await image
-      .resize({ width: 3200, height: 3200, fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: 94, effort: 5 })
-      .toFile(destination);
+    // A 2 MB ceiling does not have to mean a soft image. Keep the largest
+    // 3000px composition possible, then lower quality only if necessary.
+    const preparedImage = image.resize({ width: 3000, height: 3000, fit: 'inside', withoutEnlargement: true });
+    let optimizedBuffer = null;
+    for (const quality of [98, 96, 94, 92, 90, 88]) {
+      const candidate = await preparedImage.clone().webp({ quality, effort: 6 }).toBuffer();
+      if (candidate.length <= MAX_IMAGE_BYTES) {
+        optimizedBuffer = candidate;
+        break;
+      }
+    }
+    if (!optimizedBuffer) {
+      const smallerImage = preparedImage.clone().resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true });
+      for (const quality of [94, 92, 90, 88, 86]) {
+        const candidate = await smallerImage.clone().webp({ quality, effort: 6 }).toBuffer();
+        if (candidate.length <= MAX_IMAGE_BYTES) {
+          optimizedBuffer = candidate;
+          break;
+        }
+      }
+    }
+    if (!optimizedBuffer) {
+      optimizedBuffer = await preparedImage
+        .clone()
+        .resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 80, effort: 6 })
+        .toBuffer();
+    }
+    if (optimizedBuffer.length > MAX_IMAGE_BYTES) {
+      const error = new Error('Không thể nén ảnh xuống dưới 2 MB mà vẫn giữ chất lượng hiển thị.');
+      error.code = 'MOMENT_IMAGE_TOO_LARGE';
+      throw error;
+    }
+    await writeFile(destination, optimizedBuffer);
+    const metadata = await sharp(optimizedBuffer).metadata();
     const localUrl = `/uploads/moments/images/${filename}`;
     return {
       type: 'image',
@@ -337,7 +399,8 @@ async function persistMedia(file, userId, durationMs) {
     };
   }
 
-  if (file.size > MAX_VIDEO_BYTES) throw new Error('Video tối đa 40 MB.');
+  if (file.size > MAX_VIDEO_BYTES) throw new Error('Video nguồn tối đa 100 MB.');
+  const safeClipStartMs = clamp(clipStartMs, 0, 60 * 60 * 1000);
   await mkdir(momentVideoDirectory, { recursive: true });
   const extension = path.extname(file.originalname || '').toLowerCase() || '.mp4';
   const randomId = randomBytes(12).toString('hex');
@@ -355,12 +418,16 @@ async function persistMedia(file, userId, durationMs) {
     await runFfmpeg([
       '-y',
       '-i', sourcePath,
+      ...(safeClipStartMs ? ['-ss', String(safeClipStartMs / 1000)] : []),
+      '-t', String(MAX_VIDEO_DURATION_MS / 1000),
       '-map', '0:v:0',
-      // Chỉ thu nhỏ video quá lớn, tuyệt đối không phóng to nguồn 720p/1080p gây mờ hình.
-      '-vf', 'scale=min(1280\\,iw):min(1280\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
+      // Preserve Full HD delivery quality. Portrait 1080x1920 clips are left
+      // untouched; only larger sources are reduced before storage.
+      '-vf', 'scale=min(1920\\,iw):min(1920\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '22',
+      // Veryfast keeps processing responsive without softening the 5-second clip.
+      '-preset', 'veryfast',
+      '-crf', '20',
       '-pix_fmt', 'yuv420p',
       '-an',
       '-movflags', '+faststart',
@@ -381,6 +448,8 @@ async function persistMedia(file, userId, durationMs) {
       await runFfmpeg([
         '-y',
         '-i', sourcePath,
+        ...(safeClipStartMs ? ['-ss', String(safeClipStartMs / 1000)] : []),
+        '-t', String(MAX_VIDEO_DURATION_MS / 1000),
         '-map', '0:v:0',
         '-c:v', 'copy',
         '-an',
@@ -451,7 +520,9 @@ async function persistMedia(file, userId, durationMs) {
     mimeType,
     filename,
     thumbnailPath,
-    durationMs: Number.isFinite(Number(durationMs)) ? Math.max(0, Math.round(Number(durationMs))) : undefined,
+    durationMs: Number.isFinite(Number(durationMs))
+      ? Math.min(MAX_VIDEO_DURATION_MS, Math.max(0, Math.round(Number(durationMs))))
+      : MAX_VIDEO_DURATION_MS,
   };
 }
 
@@ -578,7 +649,7 @@ function runMomentUpload(request, response, next) {
     const tooLarge = error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE';
     return response.status(tooLarge ? 413 : 422).json({
       code: tooLarge ? 'MOMENT_MEDIA_TOO_LARGE' : 'INVALID_MOMENT_MEDIA',
-      message: tooLarge ? 'Video tối đa 40 MB, ảnh tối đa 12 MB và nhạc tối đa 20 MB.' : error.message || 'Tệp khoảnh khắc không hợp lệ.',
+      message: tooLarge ? 'Video nguồn tối đa 100 MB, ảnh tối đa 2 MB và nhạc tối đa 20 MB.' : error.message || 'Tệp khoảnh khắc không hợp lệ.',
     });
   });
 }
@@ -664,14 +735,20 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
       const user = await authenticatedUser(request, response);
       if (!user) return;
       const createdAt = { $gte: vietnamDayStart() };
-      const [imageCount, videoCount] = await Promise.all([
+      const [imageCount, videoCount, cameraVideoCount, libraryVideoCount] = await Promise.all([
         MomentPost.countDocuments({ author: user._id, 'media.type': 'image', createdAt }),
         MomentPost.countDocuments({ author: user._id, 'media.type': 'video', createdAt }),
+        MomentPost.countDocuments({ author: user._id, 'media.type': 'video', 'media.origin': 'camera', createdAt }),
+        MomentPost.countDocuments({ author: user._id, 'media.type': 'video', 'media.origin': 'library', createdAt }),
       ]);
       return response.json({
         imageCount,
         videoCount,
-        videoLimit: MAX_DAILY_VIDEOS,
+        videoLimit: MAX_DAILY_CAMERA_VIDEOS + MAX_DAILY_LIBRARY_VIDEOS,
+        cameraVideoCount,
+        cameraVideoLimit: MAX_DAILY_CAMERA_VIDEOS,
+        libraryVideoCount,
+        libraryVideoLimit: MAX_DAILY_LIBRARY_VIDEOS,
       });
     } catch (error) {
       console.error('Get daily moment stats failed:', error);
@@ -724,21 +801,27 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         return response.status(422).json({ code: 'MOMENT_AUDIO_WITHOUT_MUSIC', message: 'Tệp nhạc chỉ có thể được gắn với tiện ích Nhạc.' });
       }
       const isVideo = mediaFile.mimetype?.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(mediaFile.originalname);
+      const origin = isVideo ? videoOrigin(request.body?.videoOrigin) : '';
       if (isVideo) {
+        const videoLimit = origin === 'library' ? MAX_DAILY_LIBRARY_VIDEOS : MAX_DAILY_CAMERA_VIDEOS;
         const todayVideoCount = await MomentPost.countDocuments({
           author: user._id,
           'media.type': 'video',
+          'media.origin': origin,
           createdAt: { $gte: vietnamDayStart() },
         });
-        if (todayVideoCount >= MAX_DAILY_VIDEOS) {
+        if (todayVideoCount >= videoLimit) {
           return response.status(429).json({
-            code: 'MOMENT_VIDEO_DAILY_LIMIT',
-            message: `Mỗi tài khoản chỉ được đăng tối đa ${MAX_DAILY_VIDEOS} video mỗi ngày.`,
+            code: origin === 'library' ? 'MOMENT_LIBRARY_VIDEO_DAILY_LIMIT' : 'MOMENT_CAMERA_VIDEO_DAILY_LIMIT',
+            message: origin === 'library'
+              ? `Mỗi tài khoản chỉ được tải tối đa ${videoLimit} video từ máy mỗi ngày.`
+              : `Mỗi tài khoản chỉ được đăng tối đa ${videoLimit} video quay từ camera mỗi ngày.`,
           });
         }
       }
 
-      const media = await persistMedia(mediaFile, user._id.toString(), request.body?.durationMs);
+      const media = await persistMedia(mediaFile, user._id.toString(), request.body?.durationMs, request.body?.clipStartMs);
+      if (isVideo) media.origin = origin;
       savedMedia = media;
       if (musicAudioFile) {
         savedMusicAudioPath = await persistMomentAudio(musicAudioFile, user._id.toString());
@@ -766,6 +849,9 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
     } catch (error) {
       if (savedMedia) await removeLocalMoment(savedMedia);
       if (savedMusicAudioPath) await removeLocalMomentAudio(savedMusicAudioPath);
+      if (error?.code === 'MOMENT_IMAGE_TOO_LARGE') {
+        return response.status(413).json({ code: error.code, message: error.message });
+      }
       console.error('Create moment failed:', error);
       return response.status(500).json({ code: 'CREATE_MOMENT_FAILED', message: error.message || 'Không thể đăng khoảnh khắc lúc này.' });
     }

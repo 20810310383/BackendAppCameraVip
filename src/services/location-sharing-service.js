@@ -55,6 +55,29 @@ function coordinateFrom(point) {
   return { latitude: point.latitude, longitude: point.longitude };
 }
 
+function distanceInMeters(from, to) {
+  const earthRadius = 6_371_000;
+  const toRadians = (degrees) => degrees * (Math.PI / 180);
+  const latitudeDelta = toRadians(to.latitude - from.latitude);
+  const longitudeDelta = toRadians(to.longitude - from.longitude);
+  const latitudeOne = toRadians(from.latitude);
+  const latitudeTwo = toRadians(to.latitude);
+  const arc = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(latitudeOne) * Math.cos(latitudeTwo) * Math.sin(longitudeDelta / 2) ** 2;
+  return earthRadius * 2 * Math.atan2(Math.sqrt(arc), Math.sqrt(1 - arc));
+}
+
+function inferredSpeedKmh(previousLocation, nextLocation) {
+  if (!previousLocation?.updatedAt) return null;
+  const elapsedSeconds = (nextLocation.updatedAt.getTime() - new Date(previousLocation.updatedAt).getTime()) / 1_000;
+  // Ignore samples that are either too close together for a stable GPS estimate,
+  // or too far apart to represent continuous movement.
+  if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 2 || elapsedSeconds > 90) return null;
+  const speedKmh = (distanceInMeters(previousLocation, nextLocation) / elapsedSeconds) * 3.6;
+  if (!Number.isFinite(speedKmh) || speedKmh < 1 || speedKmh > 500) return null;
+  return Math.round(speedKmh * 10) / 10;
+}
+
 export function toLiveLocationPayload(user) {
   if (!user.sharedLocation) return null;
   return {
@@ -89,6 +112,13 @@ export async function updateSharedLocation(user, rawLocation) {
   if (!locationSharingRecipientIds(user).length) return null;
 
   const location = validateSharedLocation(rawLocation);
+  // iOS/Android may report 0 or -1 for coords.speed even while the device is
+  // moving. Derive a safe speed from consecutive server samples as a fallback
+  // so every recipient sees the same realtime movement state.
+  const estimatedSpeedKmh = inferredSpeedKmh(user.sharedLocation, location);
+  if ((location.speedKmh === null || location.speedKmh < 1) && estimatedSpeedKmh !== null) {
+    location.speedKmh = estimatedSpeedKmh;
+  }
   user.sharedLocation = location;
   user.locationTrail.push(location);
   if (user.locationTrail.length > MAX_LOCATION_TRAIL_POINTS) {
