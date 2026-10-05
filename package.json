@@ -9,7 +9,10 @@
     "check": "node --check src/server.js && node --check src/models/ConversationAppearance.js && node --check src/models/FriendRequest.js && node --check src/models/Message.js && node --check src/models/MomentPost.js && node --check src/models/SharedChain.js && node --check src/models/User.js && node --check src/routes/location.js && node --check src/routes/session.js && node --check src/routes/password-reset.js && node --check src/routes/profile.js && node --check src/routes/posts.js && node --check src/routes/shared-chain.js && node --check src/routes/social.js && node --check src/routes/messages.js && node --check src/services/logger.js && node --check src/services/email-service.js && node --check src/services/location-sharing-service.js && node --check src/services/message-service.js && node --check src/services/object-storage-service.js && node --check src/services/push-service.js && node --check src/services/username-service.js",
     "test:session": "node scripts/smoke-session.mjs",
     "test:password-reset": "node scripts/smoke-password-reset.mjs",
-    "verify:r2": "node scripts/verify-r2-storage.mjs"
+    "verify:r2": "node scripts/verify-r2-storage.mjs",
+    "download:stickers": "node scripts/download-sticker-webp.mjs",
+    "sync:stickers": "node scripts/generate-sticker-previews.mjs",
+    "sync:sticker-catalog": "node scripts/generate-sticker-previews.mjs --manifest-only"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1143.0",
