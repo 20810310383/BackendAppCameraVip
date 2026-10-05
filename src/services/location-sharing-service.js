@@ -73,8 +73,16 @@ function inferredSpeedKmh(previousLocation, nextLocation) {
   // Ignore samples that are either too close together for a stable GPS estimate,
   // or too far apart to represent continuous movement.
   if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 2 || elapsedSeconds > 90) return null;
-  const speedKmh = (distanceInMeters(previousLocation, nextLocation) / elapsedSeconds) * 3.6;
-  if (!Number.isFinite(speedKmh) || speedKmh < 1 || speedKmh > 500) return null;
+  const distanceMeters = distanceInMeters(previousLocation, nextLocation);
+  // Coordinates can drift several metres while the phone is still. Do not turn
+  // that jitter into an implausible km/h value or a moving-heart animation.
+  const GPS_NOISE_FLOOR_METERS = Math.max(
+    3,
+    Math.min(25, Math.max(previousLocation.accuracy || 0, nextLocation.accuracy || 0) * 0.5),
+  );
+  if (distanceMeters <= GPS_NOISE_FLOOR_METERS) return null;
+  const speedKmh = (distanceMeters / elapsedSeconds) * 3.6;
+  if (!Number.isFinite(speedKmh) || speedKmh < 1 || speedKmh > 250) return null;
   return Math.round(speedKmh * 10) / 10;
 }
 
