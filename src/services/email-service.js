@@ -68,3 +68,36 @@ export async function sendPasswordResetOtp({ to, fullName, otp }) {
     `,
   });
 }
+
+export async function sendAccountDeletionNotification({ fullName, email, username, deletedAt }) {
+  const recipient = String(
+    process.env.ACCOUNT_DELETION_NOTIFICATION_EMAIL || 'dokhactu1802@gmail.com',
+  ).trim();
+  if (!recipient) return;
+
+  const safeName = escapeHtml(fullName || 'Không rõ');
+  const safeEmail = escapeHtml(email || 'Không rõ');
+  const safeUsername = escapeHtml(username || 'Không rõ');
+  const timestamp = deletedAt instanceof Date ? deletedAt.toISOString() : new Date().toISOString();
+
+  return getTransporter().sendMail({
+    from: `"${APP_NAME}" <${process.env.EMAIL_USER}>`,
+    to: recipient,
+    subject: `[${APP_NAME}] Tài khoản đã được xóa`,
+    text: `Một tài khoản đã tự xóa vĩnh viễn trong ${APP_NAME}.\n\nHọ tên: ${fullName || 'Không rõ'}\nEmail: ${email || 'Không rõ'}\nUsername: @${username || 'Không rõ'}\nThời điểm: ${timestamp}`,
+    html: `
+      <div style="margin:0;padding:32px 16px;background:#090b0c;font-family:Arial,sans-serif;color:#f8fafc">
+        <div style="max-width:520px;margin:0 auto;overflow:hidden;border:1px solid #4a3030;border-radius:22px;background:#121718">
+          <div style="padding:28px;background:linear-gradient(135deg,#451b20,#171b1c)">
+            <div style="font-size:12px;font-weight:700;letter-spacing:2px;color:#ffb4b4">${APP_NAME.toUpperCase()}</div>
+            <h1 style="margin:10px 0 0;font-size:24px;color:#fff2f2">Tài khoản đã được xóa</h1>
+          </div>
+          <div style="padding:24px 28px;color:#c5cbce;font-size:14px;line-height:22px">
+            <p style="margin:0 0 14px">Người dùng đã hoàn tất yêu cầu xóa tài khoản trong ứng dụng.</p>
+            <p style="margin:0"><strong style="color:#ffffff">Họ tên:</strong> ${safeName}<br /><strong style="color:#ffffff">Email:</strong> ${safeEmail}<br /><strong style="color:#ffffff">Username:</strong> @${safeUsername}<br /><strong style="color:#ffffff">Thời điểm:</strong> ${escapeHtml(timestamp)}</p>
+          </div>
+        </div>
+      </div>
+    `,
+  });
+}

@@ -112,6 +112,13 @@ const userSchema = new mongoose.Schema(
       trim: true,
       immutable: true,
     },
+    appleSubject: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      immutable: true,
+    },
     passwordHash: {
       type: String,
       select: false,
@@ -132,6 +139,7 @@ userSchema.set('toJSON', {
     delete returnedObject.blockedUsers;
     delete returnedObject.expoPushTokens;
     delete returnedObject.googleSubject;
+    delete returnedObject.appleSubject;
     delete returnedObject.locationSharingEnabled;
     delete returnedObject.locationSharingHasBeenConfigured;
     delete returnedObject.locationSharingRecipientIds;

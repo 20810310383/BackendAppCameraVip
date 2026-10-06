@@ -11,6 +11,8 @@ import { MomentPost } from '../models/MomentPost.js';
 import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
+import { deleteUserAccount } from '../services/account-deletion-service.js';
+import { sendAccountDeletionNotification } from '../services/email-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -266,6 +268,39 @@ export function createProfileRouter({ isDatabaseReady, emitSocialEvent = () => u
       return response.status(500).json({
         code: 'UPDATE_PROFILE_FAILED',
         message: 'Không thể cập nhật hồ sơ lúc này.',
+      });
+    }
+  });
+
+  router.delete('/users/me', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+
+      const accountSummary = {
+        fullName: user.fullName,
+        email: user.email,
+        username: user.username,
+      };
+      await deleteUserAccount({ user, emitSocialEvent });
+
+      // The notification is for the app owner only. It must never delay or
+      // prevent the user's in-app account deletion if email is unavailable.
+      void sendAccountDeletionNotification({
+        ...accountSummary,
+        deletedAt: new Date(),
+      }).catch((error) => console.error('Account deletion notification failed:', error));
+
+      return response.json({
+        message: 'Tài khoản và dữ liệu liên quan đã được xóa vĩnh viễn.',
+      });
+    } catch (error) {
+      console.error('Delete account failed:', error);
+      return response.status(500).json({
+        code: 'ACCOUNT_DELETION_FAILED',
+        message: 'Chưa thể xóa tài khoản lúc này. Vui lòng thử lại sau.',
       });
     }
   });
