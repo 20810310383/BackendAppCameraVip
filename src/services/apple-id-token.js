@@ -1,4 +1,5 @@
 import { createPublicKey, verify as verifySignature } from 'node:crypto';
+import { get as httpsGet } from 'node:https';
 import { BUNDLED_APPLE_JWKS } from './apple-jwks-fallback.js';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
@@ -6,6 +7,7 @@ const APPLE_JWKS_URL = `${APPLE_ISSUER}/auth/keys`;
 const JWKS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const JWKS_REQUEST_TIMEOUT_MS = 8_000;
 const JWKS_REQUEST_RETRY_DELAYS_MS = [0, 300, 1_000];
+const JWKS_MAX_RESPONSE_BYTES = 1_000_000;
 
 let cachedRemoteKeys = null;
 let cachedRemoteKeysExpiresAt = 0;
@@ -77,22 +79,72 @@ function wait(delayMs) {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+function requestAppleJwks() {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    const fail = (error) => complete(reject, error instanceof Error ? error : new Error(String(error)));
+
+    const request = httpsGet(APPLE_JWKS_URL, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'CameraDaily-AppleTokenVerifier/1.0',
+      },
+    }, (response) => {
+      if (response.statusCode !== 200) {
+        response.resume();
+        fail(new Error(`Apple JWKS returned ${response.statusCode ?? 'an unknown status'}.`));
+        return;
+      }
+
+      const declaredLength = Number(response.headers['content-length']);
+      if (Number.isFinite(declaredLength) && declaredLength > JWKS_MAX_RESPONSE_BYTES) {
+        response.resume();
+        fail(new Error('Apple JWKS response is too large.'));
+        return;
+      }
+
+      const chunks = [];
+      let receivedBytes = 0;
+      response.on('data', (chunk) => {
+        receivedBytes += chunk.length;
+        if (receivedBytes > JWKS_MAX_RESPONSE_BYTES) {
+          response.destroy();
+          fail(new Error('Apple JWKS response is too large.'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once('error', fail);
+      response.once('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          complete(resolve, body);
+        } catch {
+          fail(new Error('Apple JWKS response is not valid JSON.'));
+        }
+      });
+    });
+
+    request.setTimeout(JWKS_REQUEST_TIMEOUT_MS, () => {
+      request.destroy(new Error(`Apple JWKS request timed out after ${JWKS_REQUEST_TIMEOUT_MS}ms.`));
+    });
+    request.once('error', fail);
+  });
+}
+
 async function fetchAppleKeys() {
   let lastError = null;
 
   for (const delayMs of JWKS_REQUEST_RETRY_DELAYS_MS) {
     if (delayMs > 0) await wait(delayMs);
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), JWKS_REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(APPLE_JWKS_URL, {
-        signal: controller.signal,
-        headers: { Accept: 'application/json' },
-      });
-      if (!response.ok) throw new Error(`Apple JWKS returned ${response.status}.`);
-
-      const body = await response.json();
+      const body = await requestAppleJwks();
       const keys = Array.isArray(body?.keys) ? body.keys.filter(isUsableAppleKey) : [];
       if (keys.length === 0) throw new Error('Apple JWKS response has no usable RSA keys.');
 
@@ -102,8 +154,6 @@ async function fetchAppleKeys() {
       return keys;
     } catch (error) {
       lastError = error;
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
