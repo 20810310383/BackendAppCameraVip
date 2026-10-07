@@ -18,6 +18,7 @@ const areaLabels = {
   SYSTEM: 'HỆ THỐNG',
   MONGO: 'CƠ SỞ DỮ LIỆU',
   EMAIL: 'EMAIL',
+  AUTH: 'XÁC THỰC',
   CHESS: 'CỜ VUA',
   SOCKET: 'THỜI GIAN THỰC',
   MAP: 'BẢN ĐỒ',

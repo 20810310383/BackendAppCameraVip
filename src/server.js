@@ -34,6 +34,7 @@ import { getStockfishMove, STOCKFISH_SETTINGS, warmStockfish } from './services/
 import { verifyEmailTransport } from './services/email-service.js';
 import { findAvailableUsername } from './services/username-service.js';
 import { hashSessionToken } from './services/session-service.js';
+import { warmAppleIdTokenVerificationKeys } from './services/apple-id-token.js';
 import { log, startupBanner } from './services/logger.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
@@ -564,6 +565,13 @@ async function start() {
   httpServer.on('listening', () => {
     startupBanner({ port: PORT, databaseReady: mongoReady });
     void warmStockfish().then(() => log.success('CHESS', 'Stockfish đã sẵn sàng')).catch((error) => log.failure('CHESS', error));
+    void warmAppleIdTokenVerificationKeys().then((status) => {
+      if (status.source === 'remote' || status.source === 'cache') {
+        log.success('AUTH', `Đã sẵn sàng xác minh Apple Sign In (${status.keyCount} khóa).`);
+      } else {
+        log.warn('AUTH', `Đang dùng khóa Apple dự phòng (${status.keyCount} khóa). Kiểm tra outbound HTTPS tới appleid.apple.com: ${status.refreshError}`);
+      }
+    }).catch((error) => log.failure('AUTH', error));
   });
 
   httpServer.on('error', (error) => {
