@@ -13,7 +13,13 @@ import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { canUsersMessage, conversationKeyFor, messageAccessStatus } from '../services/message-service.js';
 import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
-import { getRecipientBadgeCount, isExpoPushToken, sendChatPushNotification } from '../services/push-service.js';
+import {
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  getNotificationPreferences,
+  getRecipientBadgeCount,
+  isExpoPushToken,
+  sendChatPushNotification,
+} from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -109,7 +115,7 @@ async function authenticatedUser(request, response) {
     response.status(401).json({ code: 'SESSION_INVALID', message: 'Phiên đăng nhập đã hết hạn.' });
     return null;
   }
-  const user = await User.findById(session.userId);
+  const user = await User.findById(session.userId).select('+notificationPreferences');
   if (!user) {
     response.status(401).json({ code: 'SESSION_INVALID', message: 'Tài khoản không còn tồn tại.' });
     return null;
@@ -401,6 +407,49 @@ export function createMessageRouter({
     } catch (error) {
       console.error('Get notification badge count failed:', error);
       return response.status(500).json({ code: 'GET_BADGE_COUNT_FAILED', message: 'Không thể tải số thông báo chưa xem.' });
+    }
+  });
+
+  router.get('/notifications/preferences', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      return response.json({ preferences: getNotificationPreferences(user) });
+    } catch (error) {
+      console.error('Get notification preferences failed:', error);
+      return response.status(500).json({ code: 'GET_NOTIFICATION_PREFERENCES_FAILED', message: 'Không thể tải cài đặt thông báo.' });
+    }
+  });
+
+  router.patch('/notifications/preferences', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const requested = request.body?.preferences;
+      if (!requested || typeof requested !== 'object' || Array.isArray(requested)) {
+        return response.status(422).json({ code: 'INVALID_NOTIFICATION_PREFERENCES', message: 'Cài đặt thông báo không hợp lệ.' });
+      }
+
+      const changes = {};
+      for (const key of Object.keys(DEFAULT_NOTIFICATION_PREFERENCES)) {
+        if (requested[key] === undefined) continue;
+        if (typeof requested[key] !== 'boolean') {
+          return response.status(422).json({ code: 'INVALID_NOTIFICATION_PREFERENCES', message: 'Mỗi lựa chọn thông báo phải là bật hoặc tắt.' });
+        }
+        changes[key] = requested[key];
+      }
+      if (!Object.keys(changes).length) {
+        return response.status(422).json({ code: 'INVALID_NOTIFICATION_PREFERENCES', message: 'Chưa có lựa chọn thông báo nào để cập nhật.' });
+      }
+
+      user.notificationPreferences = { ...getNotificationPreferences(user), ...changes };
+      await user.save();
+      return response.json({ preferences: getNotificationPreferences(user) });
+    } catch (error) {
+      console.error('Update notification preferences failed:', error);
+      return response.status(500).json({ code: 'UPDATE_NOTIFICATION_PREFERENCES_FAILED', message: 'Không thể lưu cài đặt thông báo.' });
     }
   });
 

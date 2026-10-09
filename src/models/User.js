@@ -12,6 +12,19 @@ const sharedLocationSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const notificationPreferencesSchema = new mongoose.Schema(
+  {
+    pushEnabled: { type: Boolean, default: true },
+    messages: { type: Boolean, default: true },
+    friendRequests: { type: Boolean, default: true },
+    groupActivity: { type: Boolean, default: true },
+    sound: { type: Boolean, default: true },
+    vibration: { type: Boolean, default: true },
+    badges: { type: Boolean, default: true },
+  },
+  { _id: false },
+);
+
 const userSchema = new mongoose.Schema(
   {
     fullName: {
@@ -105,6 +118,11 @@ const userSchema = new mongoose.Schema(
       default: [],
       select: false,
     },
+    notificationPreferences: {
+      type: notificationPreferencesSchema,
+      default: () => ({}),
+      select: false,
+    },
     googleSubject: {
       type: String,
       unique: true,
@@ -138,6 +156,7 @@ userSchema.set('toJSON', {
     delete returnedObject.followers;
     delete returnedObject.blockedUsers;
     delete returnedObject.expoPushTokens;
+    delete returnedObject.notificationPreferences;
     delete returnedObject.googleSubject;
     delete returnedObject.appleSubject;
     delete returnedObject.locationSharingEnabled;

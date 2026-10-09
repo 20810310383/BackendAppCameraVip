@@ -10,6 +10,29 @@ const PUSH_REQUEST_TIMEOUT_MS = 12_000;
 const PUSH_RETRY_DELAYS_MS = [500, 1_500];
 const PUSH_RECEIPT_DELAYS_MS = [15_000, 60_000, 5 * 60_000];
 
+function androidMessageChannelId(preferences) {
+  return `messages-${preferences.sound ? 'sound' : 'silent'}-${preferences.vibration ? 'vibrate' : 'quiet'}`;
+}
+
+export const DEFAULT_NOTIFICATION_PREFERENCES = Object.freeze({
+  pushEnabled: true,
+  messages: true,
+  friendRequests: true,
+  groupActivity: true,
+  sound: true,
+  vibration: true,
+  badges: true,
+});
+
+export function getNotificationPreferences(user) {
+  const savedDocument = user?.notificationPreferences;
+  const saved = typeof savedDocument?.toObject === 'function' ? savedDocument.toObject() : savedDocument;
+  return {
+    ...DEFAULT_NOTIFICATION_PREFERENCES,
+    ...(saved && typeof saved === 'object' ? saved : {}),
+  };
+}
+
 function previewFor(message) {
   if (message.type === 'image') return 'Đã gửi một ảnh 📷';
   if (message.type === 'audio') return 'Đã gửi một tin nhắn thoại 🎙️';
@@ -148,9 +171,12 @@ export async function getRecipientBadgeCount(recipientId) {
   return unreadMessages + pendingRequests + sharedChainItems;
 }
 
-async function sendPushNotification({ recipientId, title, body, data, logLabel, badge }) {
+async function sendPushNotification({ recipientId, title, body, data, logLabel, category, badge }) {
   try {
-    const recipient = await User.findById(recipientId).select('+expoPushTokens');
+    const recipient = await User.findById(recipientId).select('+expoPushTokens +notificationPreferences');
+    const preferences = getNotificationPreferences(recipient);
+    if (!preferences.pushEnabled || !preferences[category]) return;
+
     const tokens = [...new Map((recipient?.expoPushTokens || [])
       .filter((entry) => isExpoPushToken(entry.token))
       .map((entry) => [entry.token, { token: entry.token, platform: entry.platform }])).values()];
@@ -172,12 +198,14 @@ async function sendPushNotification({ recipientId, title, body, data, logLabel, 
       to: token,
       title,
       body,
-      // Android can use the packaged MP3. iOS uses its system sound because MP3 is not
-      // a reliable APNs custom-sound format; use a WAV asset when a shared custom iOS sound is needed.
-      sound: platform === 'android' ? 'amthanhtinnhan.mp3' : 'default',
-      channelId: 'messages',
+      // Android 8+ applies sound and vibration at the channel level. iOS uses its
+      // system sound because the bundled MP3 is not a reliable APNs custom sound.
+      sound: platform === 'ios' && preferences.sound ? 'default' : undefined,
+      channelId: platform === 'android' ? androidMessageChannelId(preferences) : undefined,
       priority: 'high',
-      badge: platform === 'ios' ? badgeCount : undefined,
+      // Send zero rather than omitting the field when badges are disabled, so
+      // APNs clears a number that was displayed before this preference changed.
+      badge: platform === 'ios' ? (preferences.badges ? badgeCount : 0) : undefined,
       interruptionLevel: platform === 'ios' ? 'active' : undefined,
       data,
     }));
@@ -215,6 +243,7 @@ export function sendChatPushNotification({ recipientId, sender, message }) {
     title: sender.fullName,
     body: previewFor(message),
     logLabel: 'chat',
+    category: 'messages',
     data: {
       type: 'chat_message',
       friendId,
@@ -230,6 +259,7 @@ export function sendFriendRequestPushNotification({ recipientId, sender, request
     title: 'Lời mời kết bạn',
     body: `${sender.fullName || sender.username || 'Một người dùng'} đã gửi lời mời kết bạn cho bạn.`,
     logLabel: 'friend request',
+    category: 'friendRequests',
     data: {
       type: 'friend_request',
       requestId,
@@ -249,6 +279,7 @@ export function sendSharedChainInvitationPushNotification({ recipientId, sender,
       ? `${senderName} đã mời bạn tham gia nhóm${groupName}.`
       : `Bạn có một lời mời tham gia nhóm${groupName}.`,
     logLabel: 'shared chain invitation',
+    category: 'groupActivity',
     data: {
       type: 'shared_chain_invitation',
       chainId,
@@ -265,6 +296,7 @@ export function sendSharedChainJoinRequestPushNotification({ recipientId, sender
     title: 'Yêu cầu tham gia nhóm',
     body: `${senderName} muốn tham gia nhóm${groupName}.`,
     logLabel: 'shared chain join request',
+    category: 'groupActivity',
     data: {
       type: 'shared_chain_join_request',
       chainId,
@@ -281,6 +313,7 @@ export function sendSharedChainInvitationReviewPushNotification({ recipientId, s
     title: 'Đề xuất mời thành viên',
     body: `${senderName} có đề xuất mời thành viên mới vào nhóm${groupName}.`,
     logLabel: 'shared chain invitation review',
+    category: 'groupActivity',
     data: {
       type: 'shared_chain_invitation_review',
       chainId,
