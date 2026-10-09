@@ -13,7 +13,7 @@ import { Session } from '../models/Session.js';
 import { User } from '../models/User.js';
 import { canUsersMessage, conversationKeyFor, messageAccessStatus } from '../services/message-service.js';
 import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
-import { isExpoPushToken, sendChatPushNotification } from '../services/push-service.js';
+import { getRecipientBadgeCount, isExpoPushToken, sendChatPushNotification } from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -390,6 +390,19 @@ export function createMessageRouter({
   emitMessageEvent = () => undefined,
 }) {
   const router = Router();
+
+  router.get('/notifications/badge-count', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const badgeCount = await getRecipientBadgeCount(user._id);
+      return response.json({ badgeCount });
+    } catch (error) {
+      console.error('Get notification badge count failed:', error);
+      return response.status(500).json({ code: 'GET_BADGE_COUNT_FAILED', message: 'Không thể tải số thông báo chưa xem.' });
+    }
+  });
 
   router.put('/notifications/push-token', async (request, response) => {
     if (!isDatabaseReady()) return databaseUnavailable(response);

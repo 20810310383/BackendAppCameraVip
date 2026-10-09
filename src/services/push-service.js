@@ -1,3 +1,6 @@
+import { FriendRequest } from '../models/FriendRequest.js';
+import { Message } from '../models/Message.js';
+import { SharedChain } from '../models/SharedChain.js';
 import { User } from '../models/User.js';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
@@ -95,13 +98,75 @@ function scheduleReceiptCheck({ recipientId, receiptTokens, logLabel, attempt = 
   timer.unref?.();
 }
 
-async function sendPushNotification({ recipientId, title, body, data, logLabel }) {
+function sameUserId(value, recipientId) {
+  return value?.toString() === recipientId.toString();
+}
+
+/**
+ * Count every outstanding item that is actionable by the recipient.  This is
+ * deliberately shared by the push payload and the client-side badge refresh
+ * endpoint so an opened app cannot overwrite a correct APNs badge with a
+ * messages-only value.
+ */
+export async function getRecipientBadgeCount(recipientId) {
+  const [unreadMessages, pendingRequests, sharedChains] = await Promise.all([
+    Message.countDocuments({
+      recipient: recipientId,
+      readAt: null,
+      deletedFor: { $ne: recipientId },
+    }),
+    FriendRequest.countDocuments({
+      to: recipientId,
+      status: 'pending',
+    }),
+    // A user owns at most 12 groups. Fetching the small matching set lets us
+    // count individual pending array entries without an expensive collection
+    // aggregation on every outgoing notification.
+    SharedChain.find({
+      $or: [
+        { 'pendingInvitations.user': recipientId },
+        { owner: recipientId },
+      ],
+    }).select('owner pendingInvitations pendingJoinRequests').lean(),
+  ]);
+
+  const sharedChainItems = sharedChains.reduce((total, chain) => {
+    const directInvitations = (chain.pendingInvitations || []).filter((invitation) => (
+      sameUserId(invitation.user, recipientId)
+      && !invitation.awaitingOwnerApproval
+      && !invitation.awaitingFriendship
+    )).length;
+
+    if (!sameUserId(chain.owner, recipientId)) return total + directInvitations;
+
+    const invitationReviews = (chain.pendingInvitations || [])
+      .filter((invitation) => invitation.awaitingOwnerApproval).length;
+    const joinRequests = (chain.pendingJoinRequests || []).length;
+    return total + directInvitations + invitationReviews + joinRequests;
+  }, 0);
+
+  return unreadMessages + pendingRequests + sharedChainItems;
+}
+
+async function sendPushNotification({ recipientId, title, body, data, logLabel, badge }) {
   try {
     const recipient = await User.findById(recipientId).select('+expoPushTokens');
     const tokens = [...new Map((recipient?.expoPushTokens || [])
       .filter((entry) => isExpoPushToken(entry.token))
       .map((entry) => [entry.token, { token: entry.token, platform: entry.platform }])).values()];
     if (!tokens.length) return;
+
+    let badgeCount = typeof badge === 'number' ? badge : 1;
+    if (typeof badge !== 'number') {
+      try {
+        // The persisted notification action was created before this call, so a
+        // positive badge is expected. Keep delivering the alert if a transient
+        // database failure prevents an exact count.
+        badgeCount = Math.max(1, await getRecipientBadgeCount(recipientId));
+      } catch (error) {
+        console.warn(`Could not calculate ${logLabel} badge count: ${error.message}`);
+      }
+    }
 
     const payload = tokens.map(({ token, platform }) => ({
       to: token,
@@ -112,7 +177,7 @@ async function sendPushNotification({ recipientId, title, body, data, logLabel }
       sound: platform === 'android' ? 'amthanhtinnhan.mp3' : 'default',
       channelId: 'messages',
       priority: 'high',
-      badge: platform === 'ios' ? 1 : undefined,
+      badge: platform === 'ios' ? badgeCount : undefined,
       interruptionLevel: platform === 'ios' ? 'active' : undefined,
       data,
     }));
