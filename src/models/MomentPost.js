@@ -42,6 +42,18 @@ const postViewSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const momentReactionSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    emoji: { type: String, trim: true, maxlength: 16, required: true },
+    intensity: { type: Number, min: 1, max: 5, default: 1 },
+    reactedAt: { type: Date, default: Date.now, required: true },
+    // A reaction stays pending until the author reaches this exact moment.
+    // This makes the cascade survive app restarts and periods without a socket.
+    seenAt: { type: Date, default: null },
+  },
+);
+
 const widgetSchema = new mongoose.Schema(
   {
     badge: { type: String, trim: true, maxlength: 40 },
@@ -108,6 +120,7 @@ const momentPostSchema = new mongoose.Schema(
     sharedChainExcludedIds: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'SharedChain' }], default: [] },
     sharedChainSelectionStarted: { type: Boolean, default: true },
     views: { type: [postViewSchema], default: [] },
+    reactions: { type: [momentReactionSchema], default: [] },
   },
   { timestamps: true },
 );

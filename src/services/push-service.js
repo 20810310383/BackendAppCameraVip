@@ -1,7 +1,11 @@
 import { User } from '../models/User.js';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+const EXPO_PUSH_RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
 const EXPO_PUSH_TOKEN = /^(?:ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/;
+const PUSH_REQUEST_TIMEOUT_MS = 12_000;
+const PUSH_RETRY_DELAYS_MS = [500, 1_500];
+const PUSH_RECEIPT_DELAYS_MS = [15_000, 60_000, 5 * 60_000];
 
 function previewFor(message) {
   if (message.type === 'image') return 'Đã gửi một ảnh 📷';
@@ -14,12 +18,89 @@ export function isExpoPushToken(value) {
   return typeof value === 'string' && EXPO_PUSH_TOKEN.test(value);
 }
 
+function expoHeaders() {
+  const accessToken = process.env.EXPO_ACCESS_TOKEN?.trim();
+  return {
+    Accept: 'application/json',
+    'Accept-encoding': 'gzip, deflate',
+    'Content-Type': 'application/json',
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+  };
+}
+
+function wait(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function postToExpo(url, payload) {
+  let lastError;
+  for (let attempt = 0; attempt <= PUSH_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: expoHeaders(),
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(PUSH_REQUEST_TIMEOUT_MS),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (response.ok) return body;
+      const message = body?.errors?.[0]?.message || response.statusText || `HTTP ${response.status}`;
+      const error = new Error(message);
+      error.status = response.status;
+      if (response.status !== 429 && response.status < 500) throw error;
+      lastError = error;
+    } catch (error) {
+      lastError = error;
+      if (error?.status && error.status !== 429 && error.status < 500) throw error;
+    }
+    const retryDelay = PUSH_RETRY_DELAYS_MS[attempt];
+    if (retryDelay !== undefined) await wait(retryDelay);
+  }
+  throw lastError || new Error('Expo Push Service không phản hồi.');
+}
+
+async function removeInvalidTokens(recipientId, tokens) {
+  if (!tokens.length) return;
+  await User.updateOne({ _id: recipientId }, { $pull: { expoPushTokens: { token: { $in: [...new Set(tokens)] } } } });
+}
+
+function scheduleReceiptCheck({ recipientId, receiptTokens, logLabel, attempt = 0 }) {
+  const delay = PUSH_RECEIPT_DELAYS_MS[attempt];
+  if (delay === undefined || !receiptTokens.size) return;
+  const timer = setTimeout(async () => {
+    try {
+      const receiptIds = [...receiptTokens.keys()];
+      const body = await postToExpo(EXPO_PUSH_RECEIPTS_URL, { ids: receiptIds });
+      const receipts = body?.data || {};
+      const invalidTokens = [];
+      const pendingReceipts = new Map();
+      for (const [receiptId, token] of receiptTokens) {
+        const receipt = receipts[receiptId];
+        if (!receipt) {
+          pendingReceipts.set(receiptId, token);
+          continue;
+        }
+        if (receipt.status !== 'error') continue;
+        const errorCode = receipt.details?.error || 'UnknownError';
+        console.warn(`Expo ${logLabel} push receipt failed (${errorCode}): ${receipt.message || 'Không rõ lỗi'}`);
+        if (errorCode === 'DeviceNotRegistered') invalidTokens.push(token);
+      }
+      await removeInvalidTokens(recipientId, invalidTokens);
+      scheduleReceiptCheck({ recipientId, receiptTokens: pendingReceipts, logLabel, attempt: attempt + 1 });
+    } catch (error) {
+      console.warn(`Could not check ${logLabel} push receipts: ${error.message}`);
+      scheduleReceiptCheck({ recipientId, receiptTokens, logLabel, attempt: attempt + 1 });
+    }
+  }, delay);
+  timer.unref?.();
+}
+
 async function sendPushNotification({ recipientId, title, body, data, logLabel }) {
   try {
     const recipient = await User.findById(recipientId).select('+expoPushTokens');
-    const tokens = (recipient?.expoPushTokens || [])
+    const tokens = [...new Map((recipient?.expoPushTokens || [])
       .filter((entry) => isExpoPushToken(entry.token))
-      .map((entry) => ({ token: entry.token, platform: entry.platform }));
+      .map((entry) => [entry.token, { token: entry.token, platform: entry.platform }])).values()];
     if (!tokens.length) return;
 
     const payload = tokens.map(({ token, platform }) => ({
@@ -31,24 +112,30 @@ async function sendPushNotification({ recipientId, title, body, data, logLabel }
       sound: platform === 'android' ? 'amthanhtinnhan.mp3' : 'default',
       channelId: 'messages',
       priority: 'high',
+      badge: platform === 'ios' ? 1 : undefined,
+      interruptionLevel: platform === 'ios' ? 'active' : undefined,
       data,
     }));
-    const response = await fetch(EXPO_PUSH_URL, {
-      method: 'POST',
-      headers: { Accept: 'application/json', 'Accept-encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+    const result = await postToExpo(EXPO_PUSH_URL, payload);
+    const tickets = Array.isArray(result?.data) ? result.data : result?.data ? [result.data] : [];
+    const invalidTokens = [];
+    const receiptTokens = new Map();
+    tickets.forEach((ticket, index) => {
+      const token = tokens[index]?.token;
+      if (!token) return;
+      if (ticket?.status === 'ok' && ticket.id) {
+        receiptTokens.set(ticket.id, token);
+        return;
+      }
+      if (ticket?.status === 'error') {
+        const errorCode = ticket.details?.error || 'UnknownError';
+        console.warn(`Expo ${logLabel} push ticket failed (${errorCode}): ${ticket.message || 'Không rõ lỗi'}`);
+        if (errorCode === 'DeviceNotRegistered') invalidTokens.push(token);
+      }
     });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      console.warn(`Expo push delivery failed: ${body?.errors?.[0]?.message || response.statusText}`);
-      return;
-    }
-
-    const invalidTokens = (body?.data || [])
-      .map((ticket, index) => ticket?.details?.error === 'DeviceNotRegistered' ? tokens[index]?.token : null)
-      .filter(Boolean);
-    if (invalidTokens.length) {
-      await User.updateOne({ _id: recipientId }, { $pull: { expoPushTokens: { token: { $in: invalidTokens } } } });
+    await removeInvalidTokens(recipientId, invalidTokens);
+    if (receiptTokens.size) {
+      scheduleReceiptCheck({ recipientId, receiptTokens, logLabel });
     }
   } catch (error) {
     // Push delivery is best-effort and must never block a persisted app action.
@@ -101,6 +188,38 @@ export function sendSharedChainInvitationPushNotification({ recipientId, sender,
       type: 'shared_chain_invitation',
       chainId,
       url: `/friends-posts?openNotifications=${encodeURIComponent(routeKey)}`,
+    },
+  });
+}
+
+export function sendSharedChainJoinRequestPushNotification({ recipientId, sender, chainId, chainTitle }) {
+  const senderName = sender?.fullName || sender?.username || 'Một người dùng';
+  const groupName = typeof chainTitle === 'string' && chainTitle.trim() ? ` “${chainTitle.trim()}”` : '';
+  return sendPushNotification({
+    recipientId,
+    title: 'Yêu cầu tham gia nhóm',
+    body: `${senderName} muốn tham gia nhóm${groupName}.`,
+    logLabel: 'shared chain join request',
+    data: {
+      type: 'shared_chain_join_request',
+      chainId,
+      url: '/shared-streak',
+    },
+  });
+}
+
+export function sendSharedChainInvitationReviewPushNotification({ recipientId, sender, chainId, chainTitle }) {
+  const senderName = sender?.fullName || sender?.username || 'Một thành viên';
+  const groupName = typeof chainTitle === 'string' && chainTitle.trim() ? ` “${chainTitle.trim()}”` : '';
+  return sendPushNotification({
+    recipientId,
+    title: 'Đề xuất mời thành viên',
+    body: `${senderName} có đề xuất mời thành viên mới vào nhóm${groupName}.`,
+    logLabel: 'shared chain invitation review',
+    data: {
+      type: 'shared_chain_invitation_review',
+      chainId,
+      url: '/shared-streak',
     },
   });
 }

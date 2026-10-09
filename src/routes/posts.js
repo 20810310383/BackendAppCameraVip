@@ -32,6 +32,7 @@ const MAX_VIDEO_DURATION_MS = 5_000;
 const FFMPEG_TIMEOUT_MS = 180_000;
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/heic', 'image/heif']);
 const AUDIO_MIME_TYPES = new Set(['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/x-m4a', 'audio/flac', 'audio/ogg', 'audio/webm']);
+const ALLOWED_MOMENT_REACTIONS = new Set(['❤️', '😍', '🤩', '💕', '😆', '🥺']);
 
 const momentUpload = multer({
   storage: multer.memoryStorage(),
@@ -108,6 +109,17 @@ function postPayload(post, isUserOnline) {
     authorLocalDate: plain.authorLocalDate || '',
     viewCount: Array.isArray(plain.views) ? plain.views.length : 0,
     createdAt: new Date(plain.createdAt).toISOString(),
+  };
+}
+
+function reactionPayload(reaction, isUserOnline) {
+  const plain = typeof reaction.toObject === 'function' ? reaction.toObject() : reaction;
+  return {
+    id: plain._id?.toString() || plain.id,
+    emoji: plain.emoji,
+    intensity: Math.max(1, Math.min(5, Math.round(Number(plain.intensity) || 1))),
+    reactedAt: new Date(plain.reactedAt).toISOString(),
+    from: userPayload(plain.user, isUserOnline),
   };
 }
 
@@ -898,6 +910,89 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
     }
   });
 
+  router.post('/moments/:postId/reactions', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      if (!mongoose.isValidObjectId(request.params.postId)) {
+        return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      }
+      const emoji = typeof request.body?.emoji === 'string' ? request.body.emoji.trim() : '';
+      if (!ALLOWED_MOMENT_REACTIONS.has(emoji)) {
+        return response.status(422).json({ code: 'INVALID_MOMENT_REACTION', message: 'Cảm xúc này không hợp lệ.' });
+      }
+      const post = await MomentPost.findById(request.params.postId).select('author shareMode recipientIds');
+      if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      if (!canUserViewMoment(post, user)) {
+        return response.status(403).json({ code: 'MOMENT_ACCESS_DENIED', message: 'Bạn không có quyền xem khoảnh khắc này.' });
+      }
+      if (post.author.toString() === user._id.toString()) {
+        return response.status(422).json({ code: 'OWN_MOMENT_REACTION', message: 'Bạn không thể thả cảm xúc vào khoảnh khắc của chính mình.' });
+      }
+
+      const reaction = {
+        _id: new mongoose.Types.ObjectId(),
+        user: user._id,
+        emoji,
+        intensity: Math.max(1, Math.min(5, Math.round(Number(request.body?.intensity) || 1))),
+        reactedAt: new Date(),
+        seenAt: null,
+      };
+      const updateResult = await MomentPost.updateOne(
+        { _id: post._id },
+        { $push: { reactions: { $each: [reaction], $slice: -120 } } },
+      );
+      if (!updateResult.modifiedCount) {
+        return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Khoảnh khắc không còn tồn tại.' });
+      }
+      const payload = reactionPayload({ ...reaction, user }, isUserOnline);
+      emitPostEvent(post.author.toString(), 'moment:reaction', {
+        postId: post._id.toString(),
+        reaction: payload,
+      });
+      return response.status(201).json({ reaction: payload });
+    } catch (error) {
+      console.error('React to moment failed:', error);
+      return response.status(500).json({ code: 'REACT_TO_MOMENT_FAILED', message: 'Không thể gửi cảm xúc lúc này.' });
+    }
+  });
+
+  router.post('/moments/:postId/reactions/claim', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      if (!mongoose.isValidObjectId(request.params.postId)) {
+        return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      }
+      const post = await MomentPost.findById(request.params.postId).select('author');
+      if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
+      if (post.author.toString() !== user._id.toString()) {
+        return response.status(403).json({ code: 'MOMENT_REACTIONS_FORBIDDEN', message: 'Chỉ tác giả mới nhận được cảm xúc của bài đăng.' });
+      }
+
+      const claimedPost = await MomentPost.findOneAndUpdate(
+        { _id: post._id, author: user._id, 'reactions.seenAt': null },
+        { $set: { 'reactions.$[pending].seenAt': new Date() } },
+        {
+          arrayFilters: [{ 'pending.seenAt': null }],
+          new: false,
+        },
+      )
+        .select('reactions')
+        .populate({ path: 'reactions.user', select: 'fullName username avatarPath lastActiveAt' });
+      const reactions = (claimedPost?.reactions || [])
+        .filter((entry) => !entry.seenAt && entry.user?.fullName)
+        .sort((first, second) => new Date(first.reactedAt).getTime() - new Date(second.reactedAt).getTime())
+        .map((entry) => reactionPayload(entry, isUserOnline));
+      return response.json({ reactions });
+    } catch (error) {
+      console.error('Claim moment reactions failed:', error);
+      return response.status(500).json({ code: 'CLAIM_MOMENT_REACTIONS_FAILED', message: 'Không thể tải cảm xúc của khoảnh khắc lúc này.' });
+    }
+  });
+
   router.post('/moments/:postId/view', async (request, response) => {
     if (!isDatabaseReady()) return databaseUnavailable(response);
     try {
@@ -948,16 +1043,60 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
       }
       const post = await MomentPost.findById(request.params.postId)
-        .select('author views')
-        .populate({ path: 'views.user', select: 'fullName username avatarPath lastActiveAt' });
+        .select('author views reactions')
+        .populate({ path: 'views.user', select: 'fullName username avatarPath lastActiveAt' })
+        .populate({ path: 'reactions.user', select: 'fullName username avatarPath lastActiveAt' });
       if (!post) return response.status(404).json({ code: 'MOMENT_NOT_FOUND', message: 'Không tìm thấy khoảnh khắc.' });
       if (post.author.toString() !== user._id.toString()) {
         return response.status(403).json({ code: 'MOMENT_VIEWS_FORBIDDEN', message: 'Chỉ tác giả mới xem được hoạt động của bài đăng.' });
       }
-      const viewers = (post.views || [])
-        .filter((entry) => entry.user?.fullName)
-        .sort((first, second) => new Date(second.viewedAt).getTime() - new Date(first.viewedAt).getTime())
-        .map((entry) => ({ viewer: userPayload(entry.user, isUserOnline), viewedAt: new Date(entry.viewedAt).toISOString() }));
+
+      // Collect distinct reaction emojis pressed by each user
+      const reactionsByUser = new Map();
+      const reactorUsers = new Map();
+      for (const entry of post.reactions || []) {
+        const u = entry.user;
+        const userId = u?._id?.toString() || u?.toString();
+        if (!userId || !entry.emoji) continue;
+        if (!reactionsByUser.has(userId)) {
+          reactionsByUser.set(userId, new Set());
+        }
+        reactionsByUser.get(userId).add(entry.emoji);
+        if (u && typeof u === 'object' && u.fullName && !reactorUsers.has(userId)) {
+          reactorUsers.set(userId, u);
+        }
+      }
+
+      const viewersMap = new Map();
+
+      // 1. Add anyone who viewed the post
+      for (const entry of post.views || []) {
+        if (!entry.user?.fullName) continue;
+        const userId = entry.user._id.toString();
+        viewersMap.set(userId, {
+          viewer: userPayload(entry.user, isUserOnline),
+          viewedAt: new Date(entry.viewedAt).toISOString(),
+          reactions: Array.from(reactionsByUser.get(userId) || []),
+        });
+      }
+
+      // 2. Also include anyone who reacted (even if their view record was not created yet)
+      for (const [userId, userObj] of reactorUsers.entries()) {
+        if (!viewersMap.has(userId)) {
+          const reactionEntry = (post.reactions || []).find(
+            (r) => (r.user?._id?.toString() || r.user?.toString()) === userId
+          );
+          viewersMap.set(userId, {
+            viewer: userPayload(userObj, isUserOnline),
+            viewedAt: reactionEntry?.reactedAt ? new Date(reactionEntry.reactedAt).toISOString() : new Date().toISOString(),
+            reactions: Array.from(reactionsByUser.get(userId) || []),
+          });
+        }
+      }
+
+      const viewers = Array.from(viewersMap.values()).sort(
+        (first, second) => new Date(second.viewedAt).getTime() - new Date(first.viewedAt).getTime()
+      );
       return response.json({ viewers });
     } catch (error) {
       console.error('Get moment viewers failed:', error);

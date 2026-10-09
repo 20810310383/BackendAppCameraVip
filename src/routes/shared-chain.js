@@ -12,7 +12,12 @@ import { Session } from '../models/Session.js';
 import { SharedChain } from '../models/SharedChain.js';
 import { User } from '../models/User.js';
 import { deleteStoredObject, storeProcessedFile } from '../services/object-storage-service.js';
-import { sendFriendRequestPushNotification, sendSharedChainInvitationPushNotification } from '../services/push-service.js';
+import {
+  sendFriendRequestPushNotification,
+  sendSharedChainInvitationPushNotification,
+  sendSharedChainInvitationReviewPushNotification,
+  sendSharedChainJoinRequestPushNotification,
+} from '../services/push-service.js';
 import { hashSessionToken } from '../services/session-service.js';
 
 const MAX_GROUPS_PER_OWNER = 12;
@@ -355,6 +360,12 @@ export function createSharedChainRouter({ isDatabaseReady, isUserOnline = () => 
       chain.pendingJoinRequests.push({ user: user._id, requestedAt: new Date() });
       await chain.save();
       emitSharedChainEvent(chain.owner, 'shared-chain:join-request', { chainId: chain._id.toString() });
+      void sendSharedChainJoinRequestPushNotification({
+        recipientId: chain.owner,
+        sender: user,
+        chainId: chain._id.toString(),
+        chainTitle: chain.title,
+      });
       return response.status(201).json({
         ok: true,
         message: 'Đã gửi yêu cầu tham gia. Chủ nhóm sẽ phê duyệt hoặc từ chối.',
@@ -664,6 +675,12 @@ export function createSharedChainRouter({ isDatabaseReady, isUserOnline = () => 
       await populateChain(chain);
       if (needsOwnerApproval) {
         emitSharedChainEvent(chain.owner, 'shared-chain:invitation-review-request', { chainId: chain._id.toString() });
+        void sendSharedChainInvitationReviewPushNotification({
+          recipientId: chain.owner,
+          sender: user,
+          chainId: chain._id.toString(),
+          chainTitle: chain.title,
+        });
       } else {
         for (const invitedId of addedIds) {
           emitSharedChainEvent(invitedId, 'shared-chain:invitation', { chainId: chain._id.toString() });
