@@ -22,6 +22,7 @@ import { createMessageRouter } from './routes/messages.js';
 import { createMomentPostRouter } from './routes/posts.js';
 import { createSharedChainRouter } from './routes/shared-chain.js';
 import { createLocationRouter } from './routes/location.js';
+import { createStepsRouter } from './routes/steps.js';
 import { applyChessMove, INITIAL_FEN, sideToMove } from './services/chess-service.js';
 import {
   emitLocationToRecipients,
@@ -47,6 +48,85 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: corsOrigin, methods: ['GET', 'POST'] } });
 const memoryGames = new Map();
 let mongoReady = false;
+const APP_STORE_URL = 'https://apps.apple.com/us/app/camera-daily/id6818688977';
+
+const friendInviteLandingPage = `<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#08131d" />
+    <title>Kết bạn trên Camera Daily</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      * { box-sizing: border-box; }
+      body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; color: #edf5fa; background: radial-gradient(circle at 18% 10%, #164a6d 0, transparent 38%), radial-gradient(circle at 90% 88%, #322361 0, transparent 38%), #08131d; }
+      main { width: min(100%, 420px); padding: 28px; overflow: hidden; border: 1px solid rgba(157, 217, 255, .24); border-radius: 28px; background: linear-gradient(145deg, rgba(22, 39, 53, .96), rgba(9, 19, 29, .98)); box-shadow: 0 28px 80px rgba(0, 0, 0, .42); }
+      .mark { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid rgba(170, 225, 255, .44); border-radius: 17px; font-size: 25px; background: linear-gradient(145deg, #3f9dcb, #3457be); box-shadow: 0 10px 25px rgba(32, 135, 216, .25); }
+      .eyebrow { margin: 21px 0 5px; color: #a3ddff; font-size: 12px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+      h1 { margin: 0; font-size: clamp(25px, 7vw, 31px); line-height: 1.12; letter-spacing: -.03em; }
+      p { margin: 12px 0 0; color: #aec1ce; font-size: 15px; line-height: 1.55; }
+      .invitee { color: #f5fbff; font-weight: 800; }
+      .notice { margin-top: 23px; padding: 13px 14px; border: 1px solid rgba(143, 209, 252, .16); border-radius: 15px; color: #a9c1d1; font-size: 13px; line-height: 1.45; background: rgba(5, 13, 21, .36); }
+      .actions { display: grid; gap: 10px; margin-top: 22px; }
+      button, a { width: 100%; min-height: 50px; display: flex; align-items: center; justify-content: center; padding: 12px 16px; border-radius: 14px; text-decoration: none; font-size: 15px; font-weight: 800; cursor: pointer; }
+      button { border: 0; color: #04131f; background: linear-gradient(135deg, #a5e3ff, #77bcff); box-shadow: 0 12px 28px rgba(72, 161, 228, .2); }
+      a { border: 1px solid rgba(177, 215, 235, .25); color: #e2f0f8; background: rgba(23, 40, 52, .7); }
+      .foot { margin-top: 18px; color: #7890a1; font-size: 12px; text-align: center; }
+      @media (max-width: 390px) { main { padding: 24px 20px; border-radius: 23px; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">✦</div>
+      <div class="eyebrow">Camera Daily</div>
+      <h1 id="title">Mở lời mời kết bạn</h1>
+      <p id="description">Đang mở Camera Daily để bạn gửi lời mời kết bạn.</p>
+      <div class="notice" id="notice">Nếu bạn chưa cài Camera Daily, bạn sẽ được đưa đến App Store.</div>
+      <div class="actions">
+        <button id="open-app" type="button">Mở Camera Daily</button>
+        <a id="app-store" href="${APP_STORE_URL}">Tải Camera Daily trên App Store</a>
+      </div>
+      <div class="foot" id="foot">Sau khi cài app, hãy quay lại tin nhắn và mở lại link này.</div>
+    </main>
+    <script>
+      (function () {
+        var appStoreUrl = ${JSON.stringify(APP_STORE_URL)};
+        var rawUsername = new URLSearchParams(window.location.search).get('u') || '';
+        var username = rawUsername.trim().replace(/^@+/, '').toLowerCase();
+        var validUsername = /^[a-z0-9_]{3,24}$/.test(username);
+        var title = document.getElementById('title');
+        var description = document.getElementById('description');
+        var notice = document.getElementById('notice');
+        var openButton = document.getElementById('open-app');
+
+        if (!validUsername) {
+          title.textContent = 'Link mời không hợp lệ';
+          description.textContent = 'Link này thiếu thông tin người mời. Bạn vẫn có thể tải Camera Daily từ App Store.';
+          notice.textContent = 'Hãy xin lại một link mời mới từ bạn bè của bạn.';
+          openButton.style.display = 'none';
+          return;
+        }
+
+        description.innerHTML = 'Bạn sắp gửi lời mời kết bạn tới <span class="invitee">@' + username + '</span>.';
+        var deepLink = 'cameradaily://friend-add?username=' + encodeURIComponent(username);
+        var fallbackTimer;
+        function openApp() {
+          window.location.href = deepLink;
+          window.clearTimeout(fallbackTimer);
+          fallbackTimer = window.setTimeout(function () {
+            if (!document.hidden) window.location.href = appStoreUrl;
+          }, 1400);
+        }
+        document.addEventListener('visibilitychange', function () {
+          if (document.hidden) window.clearTimeout(fallbackTimer);
+        });
+        openButton.addEventListener('click', openApp);
+        window.setTimeout(openApp, 350);
+      }());
+    </script>
+  </body>
+</html>`;
 
 function socialRoom(userId) {
   return `social:user:${userId.toString()}`;
@@ -79,6 +159,13 @@ app.use(express.json());
 app.use('/stickers', express.static(stickerPacksDirectory, { immutable: true, maxAge: '365d' }));
 app.use('/sticker-previews', express.static(stickerPreviewsDirectory, { immutable: true, maxAge: '365d' }));
 app.use('/uploads', express.static(uploadsDirectory, { immutable: true, maxAge: '30d' }));
+app.get('/invite', (_request, response) => {
+  response
+    .set('Cache-Control', 'no-store')
+    .set('Referrer-Policy', 'no-referrer')
+    .type('html')
+    .send(friendInviteLandingPage);
+});
 app.use('/api/auth', createAuthRouter({ isDatabaseReady: () => mongoReady }));
 app.use('/api/auth', createSessionRouter({
   isDatabaseReady: () => mongoReady,
@@ -109,6 +196,7 @@ app.use('/api', createLocationRouter({
   isDatabaseReady: () => mongoReady,
   emitSocialEvent,
 }));
+app.use('/api', createStepsRouter({ isDatabaseReady: () => mongoReady }));
 app.use('/api', createProfileRouter({
   isDatabaseReady: () => mongoReady,
   emitSocialEvent,

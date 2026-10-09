@@ -74,6 +74,27 @@ function idOf(value) {
   return value?._id?.toString?.() || value?.id?.toString?.() || value?.toString?.() || '';
 }
 
+function publicAppUrl(request) {
+  const configuredUrl = process.env.PUBLIC_APP_URL?.trim().replace(/\/+$/, '');
+  if (configuredUrl) return configuredUrl;
+
+  const forwardedHost = request.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const host = forwardedHost || request.get('host')?.trim();
+  if (!host || !/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host)) return '';
+
+  const forwardedProtocol = request.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+  const protocol = forwardedProtocol === 'https' || request.protocol === 'https' ? 'https' : 'http';
+  return `${protocol}://${host}`;
+}
+
+function buildFriendInviteUrl(request, username) {
+  const baseUrl = publicAppUrl(request);
+  if (!baseUrl) return '';
+  const inviteUrl = new URL('/invite', `${baseUrl}/`);
+  inviteUrl.searchParams.set('u', username);
+  return inviteUrl.toString();
+}
+
 async function friendList(userId, isUserOnline) {
   const [user, outgoingRequests, incomingRequests] = await Promise.all([
     User.findById(userId).populate({
@@ -380,6 +401,57 @@ export function createSocialRouter({
     } catch (error) {
       console.error('Block friend failed:', error);
       return response.status(500).json({ code: 'BLOCK_FRIEND_FAILED', message: 'Không thể chặn người dùng lúc này.' });
+    }
+  });
+
+  router.post('/friend-invites', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+
+      const inviteUrl = buildFriendInviteUrl(request, user.username);
+      if (!inviteUrl) {
+        return response.status(500).json({
+          code: 'INVITE_URL_UNAVAILABLE',
+          message: 'Máy chủ chưa thể tạo link mời. Vui lòng thử lại sau.',
+        });
+      }
+
+      return response.json({ url: inviteUrl, username: user.username });
+    } catch (error) {
+      console.error('Create friend invite failed:', error);
+      return response.status(500).json({ code: 'CREATE_FRIEND_INVITE_FAILED', message: 'Không thể tạo link mời lúc này.' });
+    }
+  });
+
+  router.get('/friend-invites/:username', async (request, response) => {
+    if (!isDatabaseReady()) return databaseUnavailable(response);
+
+    const username = normalizeUsername(request.params.username);
+    if (!usernameIsValid(username)) {
+      return response.status(422).json({ code: 'VALIDATION_ERROR', message: 'Username trong link kết bạn không hợp lệ.' });
+    }
+
+    try {
+      const user = await authenticatedUser(request, response);
+      if (!user) return;
+      const profileOwner = await User.findOne({ username }).select('_id username');
+      if (!profileOwner) {
+        return response.status(404).json({ code: 'USERNAME_NOT_FOUND', message: 'Không tìm thấy người dùng này.' });
+      }
+
+      const inviteUrl = buildFriendInviteUrl(request, profileOwner.username);
+      if (!inviteUrl) {
+        return response.status(500).json({
+          code: 'INVITE_URL_UNAVAILABLE',
+          message: 'Máy chủ chưa thể tạo link mời. Vui lòng thử lại sau.',
+        });
+      }
+      return response.json({ url: inviteUrl, username: profileOwner.username });
+    } catch (error) {
+      console.error('Get friend invite failed:', error);
+      return response.status(500).json({ code: 'GET_FRIEND_INVITE_FAILED', message: 'Không thể tải link kết bạn lúc này.' });
     }
   });
 
