@@ -972,6 +972,14 @@ export function createMomentPostRouter({ isDatabaseReady, isUserOnline = () => f
         return response.status(403).json({ code: 'MOMENT_REACTIONS_FORBIDDEN', message: 'Chỉ tác giả mới nhận được cảm xúc của bài đăng.' });
       }
 
+      // Older moment documents were created before reactions was added to the
+      // schema. MongoDB array filters cannot update an array that is missing,
+      // so repair that legacy shape once before claiming pending reactions.
+      await MomentPost.updateOne(
+        { _id: post._id, reactions: { $exists: false } },
+        { $set: { reactions: [] } },
+      );
+
       const claimedPost = await MomentPost.findOneAndUpdate(
         { _id: post._id, author: user._id, 'reactions.seenAt': null },
         { $set: { 'reactions.$[pending].seenAt': new Date() } },
