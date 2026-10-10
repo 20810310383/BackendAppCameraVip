@@ -127,9 +127,9 @@ export function createLocationRouter({ isDatabaseReady, emitSocialEvent = () => 
     try {
       const user = await authenticatedUser(request, response);
       if (!user) return;
-      const location = await updateSharedLocation(user, request.body || {});
-      if (location) emitLocationToRecipients(user, emitSocialEvent, 'map:location-updated', location);
-      return response.json({ ok: true, location });
+      const update = await updateSharedLocation(user, request.body || {});
+      if (update) emitLocationToRecipients(update.user, emitSocialEvent, 'map:location-updated', update.location);
+      return response.json({ ok: true, location: update?.location ?? null });
     } catch (error) {
       const status = error?.code === 'INVALID_LOCATION' ? 422 : error?.code === 'LOCATION_SHARING_DISABLED' ? 409 : 500;
       if (status === 500) console.error('Update shared location failed:', error);

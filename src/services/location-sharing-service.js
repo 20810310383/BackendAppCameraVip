@@ -127,13 +127,48 @@ export async function updateSharedLocation(user, rawLocation) {
   if ((location.speedKmh === null || location.speedKmh < 1) && estimatedSpeedKmh !== null) {
     location.speedKmh = estimatedSpeedKmh;
   }
-  user.sharedLocation = location;
-  user.locationTrail.push(location);
-  if (user.locationTrail.length > MAX_LOCATION_TRAIL_POINTS) {
-    user.locationTrail = user.locationTrail.slice(-MAX_LOCATION_TRAIL_POINTS);
+
+  // Foreground, background and socket updates can arrive at nearly the same
+  // time. Updating an already-loaded document with save() makes Mongoose's
+  // array version check reject one of those requests. $set + $push is atomic
+  // in MongoDB, so every accepted sample is stored without a VersionError.
+  const updatedUser = await User.findOneAndUpdate(
+    {
+      _id: user._id,
+      locationSharingEnabled: true,
+      'locationSharingRecipientIds.0': { $exists: true },
+    },
+    {
+      $set: { sharedLocation: location },
+      $push: {
+        locationTrail: {
+          $each: [location],
+          $slice: -MAX_LOCATION_TRAIL_POINTS,
+        },
+      },
+    },
+    {
+      new: true,
+      runValidators: true,
+    },
+  ).select('fullName username avatarPath friends locationSharingEnabled locationSharingRecipientIds sharedLocation locationTrail');
+
+  if (!updatedUser) {
+    const latestStatus = await User.findById(user._id).select('locationSharingEnabled locationSharingRecipientIds');
+    if (!latestStatus?.locationSharingEnabled) {
+      const error = new Error('Người dùng chưa bật chia sẻ vị trí.');
+      error.code = 'LOCATION_SHARING_DISABLED';
+      throw error;
+    }
+    // Sharing recipients were cleared while this location was in flight.
+    // Nothing should be persisted or emitted in that case.
+    return null;
   }
-  await user.save();
-  return toLiveLocationPayload(user);
+
+  return {
+    user: updatedUser,
+    location: toLiveLocationPayload(updatedUser),
+  };
 }
 
 export async function setLocationSharing(user, enabled) {

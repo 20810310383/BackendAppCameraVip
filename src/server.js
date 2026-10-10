@@ -362,8 +362,8 @@ io.on('connection', (socket) => {
       const user = await User.findById(socket.data.socialUserId).select('fullName username avatarPath friends locationSharingEnabled locationSharingRecipientIds sharedLocation locationTrail');
       if (!user) return respond({ error: 'Không tìm thấy tài khoản.' });
 
-      const location = await updateSharedLocation(user, payload);
-      if (location) emitLocationToRecipients(user, emitSocialEvent, 'map:location-updated', location);
+      const update = await updateSharedLocation(user, payload);
+      if (update) emitLocationToRecipients(update.user, emitSocialEvent, 'map:location-updated', update.location);
       return respond({ ok: true });
     } catch (error) {
       log.failure('MAP', error);
