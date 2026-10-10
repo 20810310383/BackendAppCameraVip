@@ -1,3 +1,4 @@
+import { request as httpsRequest } from 'node:https';
 import { FriendRequest } from '../models/FriendRequest.js';
 import { Message } from '../models/Message.js';
 import { SharedChain } from '../models/SharedChain.js';
@@ -48,7 +49,6 @@ function expoHeaders() {
   const accessToken = process.env.EXPO_ACCESS_TOKEN?.trim();
   return {
     Accept: 'application/json',
-    'Accept-encoding': 'gzip, deflate',
     'Content-Type': 'application/json; charset=utf-8',
     ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
   };
@@ -62,19 +62,7 @@ async function postToExpo(url, payload) {
   let lastError;
   for (let attempt = 0; attempt <= PUSH_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: expoHeaders(),
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(PUSH_REQUEST_TIMEOUT_MS),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (response.ok) return body;
-      const message = body?.errors?.[0]?.message || response.statusText || `HTTP ${response.status}`;
-      const error = new Error(message);
-      error.status = response.status;
-      if (response.status !== 429 && response.status < 500) throw error;
-      lastError = error;
+      return await postJsonToExpo(url, payload);
     } catch (error) {
       lastError = error;
       if (error?.status && error.status !== 429 && error.status < 500) throw error;
@@ -83,6 +71,49 @@ async function postToExpo(url, payload) {
     if (retryDelay !== undefined) await wait(retryDelay);
   }
   throw lastError || new Error('Expo Push Service không phản hồi.');
+}
+
+function postJsonToExpo(url, payload) {
+  const requestBody = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(url, {
+      method: 'POST',
+      headers: {
+        ...expoHeaders(),
+        'Content-Length': Buffer.byteLength(requestBody),
+      },
+    }, (response) => {
+      let responseBody = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { responseBody += chunk; });
+      response.once('error', reject);
+      response.once('end', () => {
+        let body = {};
+        try {
+          body = responseBody ? JSON.parse(responseBody) : {};
+        } catch {
+          const error = new Error('Expo Push Service trả về dữ liệu không hợp lệ.');
+          error.status = response.statusCode || 502;
+          reject(error);
+          return;
+        }
+
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          resolve(body);
+          return;
+        }
+
+        const message = body?.errors?.[0]?.message || body?.message || response.statusMessage || `HTTP ${response.statusCode || 500}`;
+        const error = new Error(message);
+        error.status = response.statusCode || 500;
+        reject(error);
+      });
+    });
+
+    request.once('error', reject);
+    request.setTimeout(PUSH_REQUEST_TIMEOUT_MS, () => request.destroy(new Error('Expo Push Service quá thời gian phản hồi.')));
+    request.end(requestBody);
+  });
 }
 
 async function removeInvalidTokens(recipientId, tokens) {
